@@ -321,6 +321,14 @@ let liveTriggers: [String: (LiveEvent) -> Bool] = [
     "madrugador": { (5 * 60..<7 * 60).contains($0.minuteOfDay) },
 ]
 
+/// Achievements a past day proves in its own way. Every other one is judged by its usual
+/// check on that day's data. Weekly time, Aguafiestas and ¿En serio? never pass there: they
+/// need the time of day an app was opened, and DeskTime only gives each day's totals.
+let pastDayChecks: [String: (DayData) -> Bool] = [
+    "buho": { (minutes($0.left) ?? 0) >= 23 * 60 },
+    "hola": { _ in false },
+]
+
 func isHalloween(_ date: Date, _ calendar: Calendar) -> Bool {
     let d = calendar.dateComponents([.month, .day], from: date)
     return d.month == 10 && d.day == 31
@@ -361,6 +369,11 @@ final class Achievements: ObservableObject {
         var opens = 0
         var firstDay: String?
         var migration: Int?
+        /// Past days already judged by `reviewPastDays`, as "yyyy-MM-dd".
+        var reviewedDays: [String]?
+        /// Version and day of the last complete review.
+        var reviewVersion: String?
+        var reviewDay: String?
     }
 
     @Published private(set) var state = State()
@@ -432,6 +445,75 @@ final class Achievements: ObservableObject {
         unlock(allAchievements.filter { state.unlocked[$0.id] == nil && $0.check(ctx) })
     }
 
+    private var reviewing = false
+
+    /// Days a review looks back, so a new install or update catches up on what was earned.
+    static let reviewDays = 30
+
+    /// Gives each person the achievements their past days earned, even if the app was
+    /// closed or out of date then. Runs once a day, which only needs yesterday's data, and
+    /// after every update, which judges the whole period again because the rules may have
+    /// changed. A failed fetch is retried on the next refresh.
+    func reviewPastDays(now: Date = Date(), version: String = AppInfo.version, fetch: (Date) async throws -> DayData) async {
+        let today = Fmt.ymd(now)
+        guard !reviewing, state.reviewVersion != version || state.reviewDay != today else { return }
+        reviewing = true
+        defer { reviewing = false }
+        var reviewed = Set(state.reviewVersion == version ? state.reviewedDays ?? [] : [])
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.firstWeekday = 2
+        let dates = (1...Self.reviewDays).reversed().compactMap { calendar.date(byAdding: .day, value: -$0, to: now) }
+
+        // Everything first: a day's week and streak depend on the days around it.
+        var days: [(date: Date, data: DayData)] = []
+        var complete = true
+        for date in dates where !reviewed.contains(Fmt.ymd(date)) {
+            guard let data = try? await fetch(date) else { complete = false; continue }
+            days.append((date, data))
+            reviewed.insert(Fmt.ymd(date))
+            if data.worked > 0 {
+                state.history[Fmt.ymd(date)] = DaySummary(worked: data.worked, productivity: data.productivity)
+            }
+        }
+
+        var earned: [(Achievement, Date)] = []
+        for (date, data) in days {
+            let ctx = pastContext(date, data, calendar)
+            for a in allAchievements where state.unlocked[a.id] == nil && !earned.contains(where: { $0.0.id == a.id }) {
+                if pastDayChecks[a.id]?(data) ?? a.check(ctx) { earned.append((a, date)) }
+            }
+        }
+
+        for (a, date) in earned { state.unlocked[a.id] = date }
+        state.reviewedDays = reviewed.filter { d in dates.contains { Fmt.ymd($0) == d } }.sorted()
+        state.reviewVersion = version
+        if complete { state.reviewDay = today }
+        save()
+        // A long catch-up is one notification, not a wall of them.
+        if earned.count > 3 {
+            notifySummary(earned.count)
+        } else {
+            earned.forEach { notify($0.0) }
+        }
+    }
+
+    /// What the checks would have seen on a past day.
+    private func pastContext(_ date: Date, _ data: DayData, _ calendar: Calendar) -> AchievementContext {
+        let day = Fmt.ymd(date)
+        let start = calendar.dateInterval(of: .weekOfYear, for: date)!.start
+        let week = (0..<7).map { i -> WeekDay in
+            let d = calendar.date(byAdding: .day, value: i, to: start)!
+            let s = d <= date ? state.history[Fmt.ymd(d)] : nil
+            return WeekDay(date: d, desktime: s?.worked ?? 0, productivity: s?.productivity ?? 0)
+        }
+        // The first day DeskTime or this app ran may only be part of a day.
+        let isFirst = day == state.firstDay || !state.history.keys.contains { $0 < day }
+        return AchievementContext(
+            today: data, previous: nil, now: calendar.date(bySettingHour: 12, minute: 0, second: 0, of: date) ?? date,
+            week: week, history: state.history, popoverOpensToday: 0, isFirstDay: isFirst)
+    }
+
     private var observer: NSObjectProtocol?
 
     /// Listens for app switches to unlock moment-based achievements right away.
@@ -484,6 +566,19 @@ final class Achievements: ObservableObject {
             content.body = a.detail
             content.sound = .default
             center.add(UNNotificationRequest(identifier: "achievement-\(a.id)", content: content, trigger: nil))
+        }
+    }
+
+    private func notifySummary(_ count: Int) {
+        guard persist else { return }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "🏆 \(count) logros desbloqueados"
+            content.body = "Te los habías ganado estos días. Míralos en la pestaña Logros."
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "achievement-summary", content: content, trigger: nil))
         }
     }
 }

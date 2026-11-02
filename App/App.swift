@@ -114,6 +114,9 @@ final class Store: ObservableObject {
             remember(todayWeek)
             today = t
             achievements.evaluate(today: t, week: todayWeek)
+            if !isSnapshotRender {
+                Task { await achievements.reviewPastDays { DayData.parse(try await api.get("employee", date: $0)) } }
+            }
             if Snapshot.save(day: todayJSON, week: todayWeek) {
                 WidgetCenter.shared.reloadAllTimelines()
             }
