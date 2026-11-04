@@ -14,6 +14,8 @@ struct AchievementContext {
     /// Worked hours and productivity of past days, for streaks.
     let history: [String: DaySummary]
     let popoverOpensToday: Int
+    /// Cigarette-sized pauses today, as counted on this Mac.
+    var pausesToday = 0
     /// The day Filmo Time first ran: DeskTime may only have tracked part of it.
     let isFirstDay: Bool
 
@@ -111,6 +113,10 @@ let allAchievements: [Achievement] = [
                 detail: "Empezaste a tu hora exacta, al minuto. Inquietante.") {
         guard !$0.isFirstDay, $0.arrivedToday, let a = minutes($0.today.arrived), let s = minutes($0.today.workStarts) else { return false }
         return a == s
+    },
+    Achievement(id: "quien-fuma", emoji: "🚬", title: "¿Quién fuma?",
+                detail: "10 pausas o más de entre 10 y 20 minutos en un día. ¿Salimos un momento?") {
+        $0.pausesToday >= 10
     },
     Achievement(id: "sin-casa", emoji: "🧟", title: "¿Tienes casa?",
                 detail: "12 horas trabajadas en un día. Tu sofá te echa de menos.") {
@@ -368,6 +374,8 @@ final class Achievements: ObservableObject {
         var opensDay = ""
         var opens = 0
         var firstDay: String?
+        var pausesDay: String?
+        var pauses: Int?
         var migration: Int?
         /// Past days already judged by `reviewPastDays`, as "yyyy-MM-dd".
         var reviewedDays: [String]?
@@ -426,6 +434,17 @@ final class Achievements: ObservableObject {
         if let t = previousToday, previousTodayDay == today { evaluate(today: t, week: previousWeek) }
     }
 
+    /// A stretch without input just ended. DeskTime only gives daily totals, so these
+    /// pauses can only be counted here, while the app runs.
+    func pauseEnded(lasting seconds: Double, now: Date = Date()) {
+        guard (10 * 60...20 * 60).contains(seconds) else { return }
+        let today = Fmt.ymd(now)
+        state.pauses = state.pausesDay == today ? (state.pauses ?? 0) + 1 : 1
+        state.pausesDay = today
+        save()
+        if let t = previousToday, previousTodayDay == today { evaluate(today: t, week: previousWeek) }
+    }
+
     /// Called with today's data on every refresh.
     func evaluate(today: DayData, week: [WeekDay]) {
         for d in week where !d.isFuture && d.desktime > 0 {
@@ -437,6 +456,7 @@ final class Achievements: ObservableObject {
         let ctx = AchievementContext(
             today: today, previous: previousTodayDay == Fmt.ymd(Date()) ? previousToday : nil, now: Date(), week: week, history: state.history,
             popoverOpensToday: state.opensDay == Fmt.ymd(Date()) ? state.opens : 0,
+            pausesToday: state.pausesDay == Fmt.ymd(Date()) ? state.pauses ?? 0 : 0,
             isFirstDay: state.firstDay == Fmt.ymd(Date()))
         previousToday = today
         previousTodayDay = Fmt.ymd(Date())

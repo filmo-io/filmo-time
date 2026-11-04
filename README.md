@@ -33,7 +33,7 @@ Filmo Time lee tus datos de [DeskTime](https://desktime.com) y te los enseña si
 
 ### 🏆 Logros
 
-Hay **36 logros**: unos visibles, con su progreso, y otros ocultos hasta que los consigas. Cada vez que desbloqueas uno, te llega una notificación. Si tenías la app cerrada o sin actualizar, tranquilo: cada día y tras cada actualización repasa tus últimos 30 días y te da lo que te hayas ganado.
+Hay **37 logros**: unos visibles, con su progreso, y otros ocultos hasta que los consigas. Cada vez que desbloqueas uno, te llega una notificación. Si tenías la app cerrada o sin actualizar, tranquilo: cada día y tras cada actualización repasa tus últimos 30 días y te da lo que te hayas ganado.
 
 <p align="center"><img src="docs/logros.png" width="260" alt="Pestaña Logros"></p>
 

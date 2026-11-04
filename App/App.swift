@@ -29,6 +29,11 @@ final class Store: ObservableObject {
     var onChange: (() -> Void)?
     private var timer: Timer?
     private var idleTimer: Timer?
+    private var resumedAt = Date.distantPast
+    private var lastInput: Date?
+    private var lastFetch = Date.distantPast
+    private var currentDay = Fmt.ymd(Date())
+    private var resumeRefresh: Task<Void, Never>?
     /// Keeps App Nap from stretching the timer of this window-less app.
     private var activity: NSObjectProtocol?
     /// Past days of the week never change, so each is fetched only once.
@@ -51,21 +56,29 @@ final class Store: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
-        idleTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        let idleTimer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollIdle() }
         }
+        RunLoop.main.add(idleTimer, forMode: .common)
+        self.idleTimer = idleTimer
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
-                // After a night asleep "today" has moved on.
-                if !Calendar.current.isDateInToday(self.date) && self.lastUpdate.map(Calendar.current.isDateInToday) == false {
-                    self.date = Calendar.current.startOfDay(for: Date())
-                }
-                await self.refresh()
+                self?.resumed()
             }
         }
+    }
+
+    /// A new day is a new workday: the popover moves on to it, whatever day it was showing.
+    /// Yesterday's data goes with it, so it is never shown under today's date.
+    func followNewDay(now: Date = Date()) {
+        let current = Fmt.ymd(now)
+        guard current != currentDay else { return }
+        currentDay = current
+        date = Calendar.current.startOfDay(for: now)
+        day = nil
+        week = []
     }
 
     func shift(_ days: Int) {
@@ -87,6 +100,7 @@ final class Store: ObservableObject {
     }
 
     func refresh() async {
+        followNewDay()
         if demo {
             day = Demo.day
             today = Demo.day
@@ -102,6 +116,7 @@ final class Store: ObservableObject {
             return
         }
         hasKey = true
+        lastFetch = Date()
         loading = true
         defer { loading = false; onChange?() }
         let api = DeskTimeAPI(key: key)
@@ -159,25 +174,47 @@ final class Store: ObservableObject {
         return "\(Fmt.duration(d.worked)) · \(Fmt.duration(d.productive)) prod."
     }
 
-    /// Roughly when DeskTime stops counting a computer nobody is using.
-    static let idleThreshold: Double = 3 * 60
-
     private func pollIdle() {
-        let wasPaused = paused
+        let wasPaused = paused, wasIdle = idle >= PauseRules.idleThreshold
         idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+        // Gap between two inputs, which also spans a Mac put to sleep during the pause.
+        let input = Date().addingTimeInterval(-idle)
+        if let lastInput, today?.arrivedDay == Fmt.ymd(Date()) {
+            achievements.pauseEnded(lasting: input.timeIntervalSince(lastInput))
+        }
+        lastInput = input
+        if wasIdle && idle < PauseRules.idleThreshold {
+            resumed()
+        } else if paused, idle < PauseRules.idleThreshold,
+                  Date().timeIntervalSince(lastFetch) >= PauseRules.offlineRefresh {
+            Task { await refresh() }
+        }
         if paused != wasPaused || paused { onChange?() }
+    }
+
+    /// Back at the computer: the pause ends now, and DeskTime is asked again right away
+    /// and once more when it has had time to report you online.
+    private func resumed() {
+        resumedAt = Date()
+        Task { await refresh() }
+        resumeRefresh?.cancel()
+        resumeRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(PauseRules.resumeGrace - 30))
+            guard !Task.isCancelled else { return }
+            await self?.refresh()
+        }
     }
 
     /// DeskTime is not counting right now: no input for a while, or it reports being offline.
     var paused: Bool {
         guard !demo, let t = today, t.arrived != nil else { return false }
-        return idle >= Self.idleThreshold || !t.isOnline
+        return isDeskTimePaused(idle: idle, online: t.isOnline, sinceResume: Date().timeIntervalSince(resumedAt))
     }
 
     /// The idle stretch going on now that DeskTime's figures, which only run to its
     /// last update, do not include yet.
     var ongoingIdle: Double {
-        guard let t = today, idle >= Self.idleThreshold else { return 0 }
+        guard let t = today, idle >= PauseRules.idleThreshold else { return 0 }
         let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
         let now = Double(c.hour! * 60 + c.minute!)
         let sinceUpdate = max(now - (minutes(t.left) ?? now), 0) * 60
@@ -890,7 +927,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         iconPaused = paused
         iconTimer?.invalidate()
         let from = iconPhase, to: CGFloat = paused ? 1 : 0, start = Date()
-        iconTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] t in
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] t in
             MainActor.assumeIsolated {
                 guard let self else { return t.invalidate() }
                 let p = min(CGFloat(Date().timeIntervalSince(start) / 0.4), 1)
@@ -900,6 +937,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
                 if p >= 1 { t.invalidate(); self.iconTimer = nil }
             }
         }
+        // Common modes: the animation must not freeze while a menu is open.
+        RunLoop.main.add(timer, forMode: .common)
+        iconTimer = timer
     }
 
     @objc private func statusClicked() {
@@ -918,6 +958,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            store.followNewDay()
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             store.achievements.popoverOpened()

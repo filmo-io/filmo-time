@@ -197,6 +197,21 @@ func hhmm(_ v: Any?) -> String? {
     return String(s.dropFirst(11).prefix(5))
 }
 
+/// Whether DeskTime is not counting right now. Input is known at once, but DeskTime's own
+/// status arrives late: for a while after you come back it can still say offline.
+func isDeskTimePaused(idle: Double, online: Bool, sinceResume: Double) -> Bool {
+    idle >= PauseRules.idleThreshold || (!online && sinceResume >= PauseRules.resumeGrace)
+}
+
+enum PauseRules {
+    /// Roughly when DeskTime stops counting a computer nobody is using.
+    static let idleThreshold: Double = 3 * 60
+    /// How long after coming back DeskTime's "offline" is not believed.
+    static let resumeGrace: Double = 150
+    /// How often DeskTime is asked again while it alone keeps the app paused.
+    static let offlineRefresh: Double = 120
+}
+
 /// Durations show whole minutes, cut down; parts derived from them use the same cut.
 func wholeMinutes(_ seconds: Double) -> Double { (seconds / 60).rounded(.down) * 60 }
 
