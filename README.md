@@ -6,7 +6,7 @@
 
 **Tu tiempo de trabajo de un vistazo: en la barra de menús y como widget del escritorio de macOS.**
 
-[![Descargar para macOS](https://img.shields.io/badge/Descargar_para_macOS-0B0B0C?style=for-the-badge&logo=apple&logoColor=F5F5F2)](https://github.com/imelero-filmo/filmo-time/releases/latest/download/Filmo-Time.dmg)
+[![Descargar para macOS](https://img.shields.io/badge/Descargar_para_macOS-0B0B0C?style=for-the-badge&logo=apple&logoColor=F5F5F2)](https://github.com/filmo-io/filmo-time/releases/latest/download/Filmo-Time.dmg)
 
 macOS 14 o posterior · Mac con Apple Silicon · Gratis
 
@@ -58,7 +58,7 @@ Hay **37 logros**: unos visibles, con su progreso, y otros ocultos hasta que los
 
 ### 1. Descarga e instala
 
-1. Descarga **[Filmo-Time.dmg](https://github.com/imelero-filmo/filmo-time/releases/latest/download/Filmo-Time.dmg)**.
+1. Descarga **[Filmo-Time.dmg](https://github.com/filmo-io/filmo-time/releases/latest/download/Filmo-Time.dmg)**.
 2. Ábrelo y arrastra **Filmo Time** a la carpeta **Aplicaciones**.
 
 ### 2. Permite que se abra (solo la primera vez)

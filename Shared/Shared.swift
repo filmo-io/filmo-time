@@ -451,8 +451,8 @@ enum AppInfo {
     static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
     /// Release notes of the running version on GitHub.
     static var changelogURL: URL {
-        URL(string: "https://github.com/imelero-filmo/filmo-time/releases/tag/v\(version)")
-            ?? URL(string: "https://github.com/imelero-filmo/filmo-time/releases")!
+        URL(string: "https://github.com/filmo-io/filmo-time/releases/tag/v\(version)")
+            ?? URL(string: "https://github.com/filmo-io/filmo-time/releases")!
     }
 
     /// The Filmo "F" symbol as a template image, tinted by whatever draws it.

@@ -6,7 +6,7 @@ import AppKit
 /// installed if the new app is signed by the same team as the running one.
 @MainActor
 final class Updater {
-    static let repo = "imelero-filmo/filmo-time"
+    static let repo = "filmo-io/filmo-time"
     static let assetName = "Filmo-Time.dmg"
 
     private var timer: Timer?
