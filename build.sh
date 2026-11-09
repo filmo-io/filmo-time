@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 APP_NAME="${APP_NAME:-Filmo Time}"   # shown in Finder, the menu bar and the widget gallery
-VERSION="${VERSION:-1.1.11}"   # override per release: VERSION=1.1.12 ./build.sh --dmg
+VERSION="${VERSION:-1.2.0}"   # override per release: VERSION=1.2.1 ./build.sh --dmg
 BUNDLE_ID="io.filmo.time"
 APP="$APP_NAME.app"
 EXT="$APP/Contents/PlugIns/DeskTimeWidgetExtension.appex"
@@ -34,9 +34,11 @@ xcrun actool build/Assets.xcassets --compile "$APP/Contents/Resources" --platfor
   --minimum-deployment-target 14.0 --app-icon AppIcon --output-partial-info-plist build/assets.plist >/dev/null
 ./build/render Resources/filmo-simbolo.svg build/filmo-simbolo.png 128
 cp build/filmo-simbolo.png "$APP/Contents/Resources/"
+# Company logos for the Filmo cards ship inside the app.
+mkdir -p "$APP/Contents/Resources/logos" && cp Resources/logos/*.png "$APP/Contents/Resources/logos/"
 cp build/filmo-simbolo.png "$EXT/Contents/Resources/"
 
-swiftc "${FLAGS[@]}" -o "$APP/Contents/MacOS/DeskTimeWidget" App/App.swift App/Updater.swift App/Achievements.swift Shared/Shared.swift
+swiftc "${FLAGS[@]}" -o "$APP/Contents/MacOS/DeskTimeWidget" App/App.swift App/Updater.swift App/Achievements.swift App/Prestige.swift App/Brand.swift App/Cards.swift App/CardsMore.swift App/CardsFilmo.swift App/CardsAlt.swift App/Variants.swift App/Album.swift App/SelfTest.swift Shared/Shared.swift
 # Widget extensions start in NSExtensionMain, not in their own main (Xcode does the same).
 swiftc "${FLAGS[@]}" -application-extension -Xlinker -e -Xlinker _NSExtensionMain \
   -o "$EXT/Contents/MacOS/DeskTimeWidgetExtension" Widget/Widget.swift Shared/Shared.swift
