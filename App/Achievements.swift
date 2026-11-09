@@ -382,6 +382,10 @@ final class Achievements: ObservableObject {
         /// Version and day of the last complete review.
         var reviewVersion: String?
         var reviewDay: String?
+        /// Prestige tier reached per achievement (0, Bronze, when missing).
+        var tiers: [String: Int]?
+        /// Achievements being earned again for the next tier, with the day that started.
+        var chasing: [String: String]?
     }
 
     @Published private(set) var state = State()
@@ -463,6 +467,7 @@ final class Achievements: ObservableObject {
         previousWeek = week
         lastContext = ctx
         unlock(allAchievements.filter { state.unlocked[$0.id] == nil && $0.check(ctx) })
+        promote(chasedEarned(ctx, day: Fmt.ymd(Date()), past: nil))
     }
 
     private var reviewing = false
@@ -506,6 +511,12 @@ final class Achievements: ObservableObject {
         }
 
         for (a, date) in earned { state.unlocked[a.id] = date }
+        var promoted: [Achievement] = []
+        for (date, data) in days {
+            let list = chasedEarned(pastContext(date, data, calendar), day: Fmt.ymd(date), past: data)
+            promote(list, notifying: false)
+            promoted += list
+        }
         state.reviewedDays = reviewed.filter { d in dates.contains { Fmt.ymd($0) == d } }.sorted()
         state.reviewVersion = version
         if complete { state.reviewDay = today }
@@ -516,6 +527,7 @@ final class Achievements: ObservableObject {
         } else {
             earned.forEach { notify($0.0) }
         }
+        promoted.forEach { notifyTier($0) }
     }
 
     /// What the checks would have seen on a past day.
@@ -554,6 +566,73 @@ final class Achievements: ObservableObject {
         })
     }
 
+    // MARK: Prestige
+
+    func tier(_ id: String) -> PrestigeTier {
+        guard hasTiers(id) else { return .bronze }
+        return PrestigeTier(rawValue: state.tiers?[id] ?? 0) ?? .bronze
+    }
+
+    /// Only hour and day achievements have tiers.
+    func hasTiers(_ id: String) -> Bool { prestigeRules[id] != nil }
+
+    /// Unlocked achievements and their tier, for the album rewards.
+    var tierMap: [String: Int] {
+        Dictionary(uniqueKeysWithValues: state.unlocked.keys.map { ($0, tier($0).rawValue) })
+    }
+
+    /// Achievements that count for the coin bonus: one being prestiged is lost until it is earned again.
+    var activeTierMap: [String: Int] { tierMap.filter { !isChasing($0.key) } }
+
+    var prestigeTotal: Int { state.unlocked.keys.reduce(0) { $0 + tier($1).rawValue } }
+
+    func isChasing(_ id: String) -> Bool { state.chasing?[id] != nil }
+
+    func canPrestige(_ id: String) -> Bool {
+        state.unlocked[id] != nil && prestigeRules[id] != nil && !isChasing(id) && tier(id).next != nil
+    }
+
+    /// Sets the next tier as the goal: the achievement has to be earned again on a later day.
+    func prestige(_ id: String) {
+        guard canPrestige(id) else { return }
+        var c = state.chasing ?? [:]
+        c[id] = Fmt.ymd(Date())
+        state.chasing = c
+        save()
+    }
+
+    /// How the chase for the next tier is going.
+    func chaseStatus(_ a: Achievement) -> (next: PrestigeTier, fraction: Double?, text: String)? {
+        guard let start = state.chasing?[a.id], let next = tier(a.id).next, let rule = prestigeRules[a.id] else { return nil }
+        let later = start == Fmt.ymd(Date()) ? " · cuenta desde mañana" : ""
+        guard let ctx = lastContext else { return (next, 0, "Esperando datos de hoy…") }
+        let p = rule.progress(ctx, next.rawValue)
+        return (next, min(max(p.fraction, 0), 0.99), p.text + later)
+    }
+
+    /// Chased achievements earned again on a day after their chase began.
+    private func chasedEarned(_ ctx: AchievementContext, day: String, past: DayData?) -> [Achievement] {
+        allAchievements.filter { a in
+            guard let start = state.chasing?[a.id], day > start, let next = tier(a.id).next,
+                  let rule = prestigeRules[a.id] else { return false }
+            return rule.check(ctx, next.rawValue)
+        }
+    }
+
+    private func promote(_ list: [Achievement], notifying: Bool = true) {
+        guard !list.isEmpty else { return }
+        var tiers = state.tiers ?? [:], chasing = state.chasing ?? [:]
+        for a in list {
+            tiers[a.id] = min((tiers[a.id] ?? 0) + 1, PrestigeTier.legend.rawValue)
+            chasing[a.id] = nil
+            state.seen.remove(a.id)
+        }
+        state.tiers = tiers
+        state.chasing = chasing
+        save()
+        if notifying { list.forEach { notifyTier($0) } }
+    }
+
     private func unlock(_ fresh: [Achievement]) {
         for a in fresh { state.unlocked[a.id] = Date() }
         save()
@@ -566,6 +645,8 @@ final class Achievements: ObservableObject {
         let ids = ["eficacia-100", "sin-casa"]
         for (i, id) in ids.enumerated() { state.unlocked[id] = Date().addingTimeInterval(Double(-i) * 86400) }
         state.seen = Set(ids.dropFirst(2))
+        state.tiers = ["sin-casa": 2]
+        state.chasing = ["sin-casa": Fmt.ymd(Date().addingTimeInterval(-86400))]
         lastContext = AchievementContext(today: Demo.day, previous: nil, now: Date(), week: Demo.week(around: Date()),
                                          history: [:], popoverOpensToday: 0, isFirstDay: false)
     }
@@ -589,6 +670,21 @@ final class Achievements: ObservableObject {
         }
     }
 
+    private func notifyTier(_ a: Achievement) {
+        guard persist else { return }
+        let tier = tier(a.id)
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "🏅 Logro recuperado con más nivel"
+            content.subtitle = "\(a.emoji) \(a.title)"
+            content.body = "Lo has vuelto a conseguir con un reto mayor. Tienes Tokens nuevos en el álbum."
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "achievement-\(a.id)-\(tier.rawValue)", content: content, trigger: nil))
+        }
+    }
+
     private func notifySummary(_ count: Int) {
         guard persist else { return }
         let center = UNUserNotificationCenter.current()
@@ -609,18 +705,23 @@ struct AchievementsTab: View {
     @ObservedObject var model: Achievements
 
     var body: some View {
+        // Prestiging an achievement takes it away until its harder goal is met.
         let unlocked = allAchievements
-            .filter { model.state.unlocked[$0.id] != nil }
+            .filter { model.state.unlocked[$0.id] != nil && !model.isChasing($0.id) }
             .sorted { model.state.unlocked[$0.id]! > model.state.unlocked[$1.id]! }
-        let inProgress: [(Achievement, Double, String)] = allAchievements
-            .filter { model.state.unlocked[$0.id] == nil }
+        let inProgress: [(Achievement, Double, String, PrestigeTier?)] = allAchievements
             .compactMap { a in
-                guard let tracker = progressTrackers[a.id] else { return nil }
-                guard let ctx = model.lastContext else { return (a, 0, "Esperando datos de hoy…") }
+                if let c = model.chaseStatus(a) { return (a, c.fraction ?? 0, c.text, c.next) }
+                guard model.state.unlocked[a.id] == nil, let tracker = progressTrackers[a.id] else { return nil }
+                guard let ctx = model.lastContext else { return (a, 0, "Esperando datos de hoy…", nil) }
                 let p = tracker(ctx)
-                return (a, min(max(p.fraction, 0), 0.99), p.text)
+                return (a, min(max(p.fraction, 0), 0.99), p.text, nil)
             }
-            .sorted { $0.1 > $1.1 }
+            // The ones you prestiged first: they were yours.
+            .sorted { (x: (Achievement, Double, String, PrestigeTier?), y: (Achievement, Double, String, PrestigeTier?)) -> Bool in
+                if (x.3 != nil) != (y.3 != nil) { return x.3 != nil }
+                return x.1 > y.1
+            }
         let hiddenCount = allAchievements.count - unlocked.count - inProgress.count
 
         VStack(alignment: .leading, spacing: 0) {
@@ -628,8 +729,12 @@ struct AchievementsTab: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("\(unlocked.count)").font(.system(size: 22, weight: .semibold).monospacedDigit())
                     Text("de \(allAchievements.count) logros").font(.system(size: 12)).foregroundStyle(.secondary)
+                    if model.prestigeTotal > 0 {
+                        Text("· \(model.prestigeTotal) de prestigio").font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Text("\(hiddenCount) ocultos").font(.system(size: 11)).foregroundStyle(.secondary)
+                    PrestigeInfoButton().alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
                 }
                 GeometryReader { g in
                     ZStack(alignment: .leading) {
@@ -648,12 +753,14 @@ struct AchievementsTab: View {
             let hidden = isSnapshotRender ? 0 : hiddenCount
             let rows = VStack(alignment: .leading, spacing: 4) {
                 ForEach(shown) { a in
-                    AchievementRow(achievement: a, date: model.state.unlocked[a.id], isNew: !model.state.seen.contains(a.id))
+                    AchievementRow(achievement: a, date: model.state.unlocked[a.id], isNew: !model.state.seen.contains(a.id),
+                                   tier: model.hasTiers(a.id) ? model.tier(a.id) : nil,
+                                   onPrestige: model.canPrestige(a.id) ? { withAnimation { model.prestige(a.id) } } : nil)
                 }
                 if !progress.isEmpty {
                     SectionLabel(text: "En progreso").padding(.top, 6)
-                    ForEach(progress, id: \.0.id) { a, fraction, text in
-                        ProgressRow(achievement: a, fraction: fraction, text: text)
+                    ForEach(progress, id: \.0.id) { a, fraction, text, goal in
+                        ProgressRow(achievement: a, fraction: fraction, text: text, goal: goal)
                     }
                 }
                 if hidden > 0 {
@@ -689,6 +796,8 @@ struct ProgressRow: View {
     let achievement: Achievement
     let fraction: Double
     let text: String
+    /// The tier being chased again, drawn as the ring's colour.
+    var goal: PrestigeTier? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -698,6 +807,7 @@ struct ProgressRow: View {
                 .opacity(0.45)
                 .frame(width: 30, height: 30)
                 .background(Circle().fill(Color.primary.opacity(0.04)))
+                .overlay { if let goal { Circle().strokeBorder(goal.gradient, lineWidth: 2) } }
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(achievement.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
@@ -725,6 +835,8 @@ struct AchievementRow: View {
     let achievement: Achievement
     let date: Date?
     let isNew: Bool
+    var tier: PrestigeTier? = nil
+    var onPrestige: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -732,6 +844,7 @@ struct AchievementRow: View {
                 .font(.system(size: 18))
                 .frame(width: 30, height: 30)
                 .background(Circle().fill(Color.primary.opacity(0.06)))
+                .overlay { if let tier { Circle().strokeBorder(tier.gradient, lineWidth: 2) } }
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 5) {
                     Text(achievement.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
@@ -744,10 +857,24 @@ struct AchievementRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 4)
-            if let date {
-                Text(date.formatted(.dateTime.day().month(.abbreviated).locale(Fmt.es)))
-                    .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+            VStack(alignment: .trailing, spacing: 5) {
+                if let date {
+                    Text(date.formatted(.dateTime.day().month(.abbreviated).locale(Fmt.es)))
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+                if let onPrestige, tier?.next != nil {
+                    Button(action: onPrestige) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "arrow.up.circle.fill")
+                            Text("Prestigiar")
+                        }
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.brand)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Lo pierdes hasta superar un reto mayor: " + (prestigeRules[achievement.id]?.step ?? "") + ".")
+                }
             }
         }
         .padding(.horizontal, 6).padding(.vertical, 6)
@@ -790,6 +917,39 @@ struct AchievementsTabTitle: View {
                     .background(Capsule().fill(Theme.brand))
                     .foregroundStyle(Theme.onBrand)
             }
+        }
+    }
+}
+
+/// (i) in Logros: what prestige is, in a few lines.
+private struct PrestigeInfoButton: View {
+    @State private var open = false
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            Image(systemName: "info.circle").font(.system(size: 13)).foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Qué es prestigiar")
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Prestigiar").font(.system(size: 13, weight: .bold))
+                Text("Algunos logros se pueden subir de nivel: Bronce, Plata, Oro, Platino, Diamante y Leyenda.")
+                tip("arrow.up.circle", "Al prestigiar, el logro se pierde hasta que superas un reto mayor.")
+                tip("percent", "Cada nivel suma más filmo-coins a lo que ganas.")
+                tip("gift", "Al recuperarlo te llevas un sobre de cromos y Tokens. Cuanto más alto el nivel, mejor sobre.")
+            }
+            .font(.system(size: 11))
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(14)
+            .frame(width: 280)
+        }
+    }
+
+    private func tip(_ symbol: String, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 14)
+            Text(text)
         }
     }
 }

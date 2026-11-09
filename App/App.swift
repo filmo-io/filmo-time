@@ -7,7 +7,10 @@ import WidgetKit
 
 // MARK: - Store
 
-enum Tab: Hashable { case summary, apps, week, achievements }
+enum Tab: Hashable { case summary, apps, achievements, album }
+
+/// What the summary shows: one day, its week, or any range of days.
+enum Period: Equatable { case day, week, range(Date, Date) }
 
 @MainActor
 final class Store: ObservableObject {
@@ -17,6 +20,13 @@ final class Store: ObservableObject {
     /// Always today's data, whatever day the popover shows; drives the menu bar and the name.
     @Published var today: DayData?
     @Published var week: [WeekDay] = []
+    @Published var period: Period = .day
+    /// Days of the chosen range, once loaded.
+    @Published var rangeDays: [WeekDay] = []
+    /// The range couldn't be loaded; the period view offers to try again.
+    @Published var rangeFailed = false
+
+    func retryRange() { Task { await loadRange() } }
     @Published var loading = false
     @Published var error: String?
     @Published var lastUpdate: Date?
@@ -26,6 +36,7 @@ final class Store: ObservableObject {
 
     let demo: Bool
     let achievements: Achievements
+    let album: Album
     var onChange: (() -> Void)?
     private var timer: Timer?
     private var idleTimer: Timer?
@@ -42,6 +53,7 @@ final class Store: ObservableObject {
     init(demo: Bool) {
         self.demo = demo
         achievements = Achievements(persist: !demo && !isSnapshotRender)
+        album = Album(persist: !demo && !isSnapshotRender)
         if demo { hasKey = true }
     }
 
@@ -82,21 +94,90 @@ final class Store: ObservableObject {
     }
 
     func shift(_ days: Int) {
-        guard let d = Calendar.current.date(byAdding: .day, value: days, to: date),
-              d <= Date() else { return }
-        date = d
+        let cal = Calendar.current
+        if case .range(let a, let b) = period {
+            let n = Fmt.dates(from: a, to: b).count * days
+            guard let na = cal.date(byAdding: .day, value: n, to: a), let nb = cal.date(byAdding: .day, value: n, to: b),
+                  na <= Date() else { return }
+            selectRange(na, min(nb, Date()))
+            return
+        }
+        guard let d = cal.date(byAdding: .day, value: period == .week ? days * 7 : days, to: date) else { return }
+        if period == .week, d > Date(), !Fmt.weekDates(around: d).contains(where: { cal.isDateInToday($0) }) { return }
+        if period == .day, d > Date() { return }
+        date = min(d, cal.startOfDay(for: Date()))
         Task { await refresh() }
     }
 
+    /// Whether there is a later day, week or range to move to.
+    var canGoForward: Bool {
+        switch period {
+        case .day: !isToday
+        case .week: !Fmt.weekDates(around: date).contains { Calendar.current.isDateInToday($0) }
+        case .range(_, let b): !Calendar.current.isDateInToday(b) && b < Date()
+        }
+    }
+
+    var isNow: Bool { period == .day && isToday }
+
+    var periodTitle: String {
+        switch period {
+        case .day: Fmt.longDay(date)
+        case .week: "Semana del \(Fmt.shortDay(Fmt.weekDates(around: date)[0]))"
+        case .range(let a, let b): "\(Fmt.shortDay(a)) – \(Fmt.shortDay(b))"
+        }
+    }
+
     func goToday() {
+        period = .day
         date = Calendar.current.startOfDay(for: Date())
         Task { await refresh() }
     }
 
     func open(_ d: Date) {
+        period = .day
         date = d
         tab = .summary
         Task { await refresh() }
+    }
+
+    func selectDay(_ d: Date) {
+        period = .day
+        date = Calendar.current.startOfDay(for: min(d, Date()))
+        Task { await refresh() }
+    }
+
+    func selectWeek(of d: Date) {
+        period = .week
+        date = Calendar.current.startOfDay(for: min(d, Date()))
+        Task { await refresh() }
+    }
+
+    /// Up to three months, ending no later than today.
+    func selectRange(_ a: Date, _ b: Date) {
+        let dates = Fmt.dates(from: a, to: min(max(a, b), Date())).suffix(92)
+        guard let first = dates.first, let last = dates.last else { return }
+        period = .range(first, last)
+        rangeDays = []
+        Task { await loadRange() }
+    }
+
+    /// Counting the coins of past days is under way.
+    private var backfilling = false
+
+    private func loadRange() async {
+        guard case .range(let a, let b) = period else { return }
+        let dates = Fmt.dates(from: a, to: b)
+        if demo { rangeDays = Demo.days(dates); return }
+        guard let key = KeyStore.read() else { return }
+        rangeFailed = false
+        do {
+            let r = try await DeskTimeAPI(key: key).days(dates, today: today, known: knownDays)
+            remember(r)
+            if period == .range(a, b) { rangeDays = r }
+        } catch {
+            if period == .range(a, b) { rangeFailed = true }
+        }
     }
 
     func refresh() async {
@@ -105,6 +186,8 @@ final class Store: ObservableObject {
             day = Demo.day
             today = Demo.day
             week = Demo.week(around: date)
+            album.record(today: Demo.day, week: week, tiers: achievements.activeTierMap)
+            await loadRange()
             lastUpdate = Date()
             onChange?()
             return
@@ -129,6 +212,20 @@ final class Store: ObservableObject {
             remember(todayWeek)
             today = t
             achievements.evaluate(today: t, week: todayWeek)
+            album.record(today: t, week: todayWeek, tiers: achievements.activeTierMap)
+            album.reward(tiers: achievements.tierMap)
+            if !album.state.backfilled && !backfilling && !isSnapshotRender {
+                backfilling = true
+                Task {
+                    defer { backfilling = false }
+                    let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Calendar.current.startOfDay(for: Date()))!
+                    guard yesterday >= Album.backfillStart else { album.backfill([], tiers: achievements.activeTierMap); return }
+                    if let past = try? await api.days(Fmt.dates(from: Album.backfillStart, to: yesterday), today: t, known: knownDays) {
+                        remember(past)
+                        album.backfill(past, tiers: achievements.activeTierMap)
+                    }
+                }
+            }
             if !isSnapshotRender {
                 Task { await achievements.reviewPastDays { DayData.parse(try await api.get("employee", date: $0)) } }
             }
@@ -150,6 +247,7 @@ final class Store: ObservableObject {
             }
             error = nil
             lastUpdate = Date()
+            await loadRange()
         } catch {
             self.error = error.localizedDescription
         }
@@ -281,15 +379,15 @@ struct WidgetView: View {
                     }
                 }
                 HStack(spacing: 2) {
-                    IconButton(symbol: "chevron.left", help: "Día anterior", size: 16) { store.shift(-1) }
-                    Text(Fmt.longDay(store.date))
+                    IconButton(symbol: "chevron.left", help: "Anterior", size: 16) { store.shift(-1) }
+                    Text(store.periodTitle)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .contentTransition(.opacity)
-                    IconButton(symbol: "chevron.right", help: "Día siguiente", size: 16) { store.shift(1) }
-                        .opacity(store.isToday ? 0.25 : 1)
-                        .disabled(store.isToday)
-                    if !store.isToday {
+                    IconButton(symbol: "chevron.right", help: "Siguiente", size: 16) { store.shift(1) }
+                        .opacity(store.canGoForward ? 1 : 0.25)
+                        .disabled(!store.canGoForward)
+                    if !store.isNow {
                         Button("Hoy") { store.goToday() }
                             .buttonStyle(.plain)
                             .font(.system(size: 10, weight: .semibold))
@@ -329,8 +427,8 @@ struct WidgetView: View {
     }
 
     private var tabBar: some View {
-        HStack(spacing: 18) {
-            ForEach([(Tab.summary, "Resumen"), (.apps, "Apps"), (.week, "Semana"), (.achievements, "Logros")], id: \.0) { tab, title in
+        HStack(spacing: 12) {
+            ForEach([(Tab.summary, "Resumen"), (.apps, "Apps"), (.achievements, "Logros"), (.album, "Cromos")], id: \.0) { tab, title in
                 Button {
                     withAnimation(.smooth(duration: 0.25)) { store.tab = tab }
                 } label: {
@@ -358,6 +456,7 @@ struct WidgetView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
+            if store.tab == .summary { PeriodMenu(store: store).padding(.bottom, 8).layoutPriority(1) }
         }
     }
 
@@ -367,10 +466,15 @@ struct WidgetView: View {
                 .padding(16)
         } else if let d = store.day {
             switch store.tab {
-            case .summary: SummaryTab(day: d, store: store).padding(16).transition(.opacity)
+            case .summary:
+                if store.period == .day {
+                    SummaryTab(day: d, store: store).padding(16).transition(.opacity)
+                } else {
+                    PeriodTab(store: store).padding(16).transition(.opacity)
+                }
             case .apps: AppsTab(day: d).transition(.opacity)
-            case .week: WeekTab(store: store).padding(16).transition(.opacity)
             case .achievements: AchievementsTab(model: store.achievements).transition(.opacity)
+            case .album: AlbumTab(model: store.album, achievements: store.achievements).transition(.opacity)
             }
         } else {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -678,14 +782,145 @@ struct AppRow: View {
 
 // MARK: Week
 
-struct WeekTab: View {
+/// The period picker at the top right of the summary.
+struct PeriodMenu: View {
+    @ObservedObject var store: Store
+    @State private var picking: Picking?
+    @State private var day = Date()
+    @State private var from = Date()
+    @State private var to = Date()
+    /// Snapshot only: draw the options as if the menu were open.
+    nonisolated(unsafe) static var snapshotOpen = false
+
+    enum Picking: Int, Identifiable { case day, range; var id: Int { rawValue } }
+
+    private var cal: Calendar { Calendar.current }
+    private var yesterday: Date { cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date()))! }
+
+    private var label: String {
+        switch store.period {
+        case .day: store.isToday ? "Hoy" : cal.isDate(store.date, inSameDayAs: yesterday) ? "Ayer" : Fmt.shortDay(store.date)
+        case .week: "Semana"
+        case .range: "Rango"
+        }
+    }
+
+    var body: some View {
+        Group {
+            if isSnapshotRender {
+                pill.overlay(alignment: .topTrailing) {
+                    if Self.snapshotOpen { options.offset(y: 24).fixedSize() }
+                }
+            } else {
+                Menu {
+                    Button("Hoy") { store.selectDay(Date()) }
+                    Button("Ayer") { store.selectDay(yesterday) }
+                    Button("Elegir día…") { day = store.date; picking = .day }
+                    Divider()
+                    Button("Esta semana") { store.selectWeek(of: Date()) }
+                    Button("Semana pasada") { store.selectWeek(of: cal.date(byAdding: .day, value: -7, to: Date())!) }
+                    Button("Rango…") {
+                        if case .range(let a, let b) = store.period { from = a; to = b } else {
+                            from = cal.date(byAdding: .day, value: -13, to: cal.startOfDay(for: Date()))!; to = Date()
+                        }
+                        picking = .range
+                    }
+                } label: { pill }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .popover(item: $picking, arrowEdge: .bottom) { p in
+                        switch p {
+                        case .day: dayPicker
+                        case .range: rangePicker
+                        }
+                    }
+            }
+        }
+    }
+
+    private var pill: some View {
+        HStack(spacing: 4) {
+            Text(label).font(.system(size: 11, weight: .semibold))
+            Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(Capsule().fill(Color.primary.opacity(0.07)))
+        .foregroundStyle(.primary)
+        .fixedSize()
+    }
+
+    /// The menu as drawn in snapshots.
+    private var options: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(["Hoy", "Ayer", "Elegir día…", "—", "Esta semana", "Semana pasada", "Rango…"], id: \.self) { o in
+                if o == "—" { Divider() } else { Text(o).font(.system(size: 12)) }
+            }
+        }
+        .padding(8)
+        .frame(width: 130, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .windowBackgroundColor)).shadow(radius: 6))
+    }
+
+    private var dayPicker: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            DatePicker("", selection: $day, in: ...Date(), displayedComponents: .date)
+                .datePickerStyle(.graphical).labelsHidden()
+            Button("Ver día") { store.selectDay(day); picking = nil }
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(12)
+        .environment(\.locale, Locale(identifier: "es_ES"))
+    }
+
+    private var rangePicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                ForEach([("7 días", 6), ("30 días", 29), ("90 días", 89)], id: \.1) { title, back in
+                    Button(title) {
+                        from = cal.date(byAdding: .day, value: -back, to: cal.startOfDay(for: Date()))!; to = Date()
+                    }
+                }
+                Button("Este mes") {
+                    from = cal.dateInterval(of: .month, for: Date())!.start; to = Date()
+                }
+            }
+            .controlSize(.small)
+            HStack(spacing: 10) {
+                DatePicker("Desde", selection: $from, in: ...to, displayedComponents: .date)
+                DatePicker("Hasta", selection: $to, in: from...Date(), displayedComponents: .date)
+            }
+            .datePickerStyle(.field)
+            HStack {
+                Text("Máximo 3 meses").font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Ver rango") { store.selectRange(from, to); picking = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(12)
+        .environment(\.locale, Locale(identifier: "es_ES"))
+    }
+}
+
+/// Totals and a bar per day for a week or any range.
+struct PeriodTab: View {
     @ObservedObject var store: Store
     @State private var hovered: Date?
 
-    private var worked: [WeekDay] { store.week.filter { !$0.isFuture && $0.desktime > 0 } }
+    private var days: [WeekDay] { store.period == .week ? store.week : store.rangeDays }
+    private var worked: [WeekDay] { days.filter { !$0.isFuture && $0.desktime > 0 } }
+    private var cal: Calendar { Calendar.current }
 
     var body: some View {
-        if store.week.isEmpty {
+        if days.isEmpty && store.rangeFailed && store.period != .week {
+            VStack(spacing: 8) {
+                Text("No se han podido cargar estos días.").font(.system(size: 12))
+                Button("Reintentar") { store.retryRange() }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if days.isEmpty {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(alignment: .leading, spacing: 14) {
@@ -705,18 +940,20 @@ struct WeekTab: View {
             Stat(title: "Trabajado", value: Fmt.duration(desk))
             Stat(title: "Productivo", value: Fmt.duration(total))
             Stat(title: "Productividad", value: Fmt.percent(prod))
+            Stat(title: "Media al día", value: worked.isEmpty ? "—" : Fmt.duration(desk / Double(worked.count)))
+                .help("Media de los \(worked.count) días con actividad")
         }
     }
 
     private var chart: some View {
-        Chart(store.week) { d in
-            BarMark(x: .value("Día", d.label), y: .value("Horas", d.productive / 3600))
+        Chart(days) { d in
+            BarMark(x: .value("Día", d.date, unit: .day), y: .value("Horas", d.productive / 3600))
                 .foregroundStyle(Theme.brand.opacity(opacity(d)))
-                .cornerRadius(3)
+                .cornerRadius(days.count > 31 ? 1 : 3)
             // Stacked on top: the rest of the worked time (neutral and unproductive).
-            BarMark(x: .value("Día", d.label), y: .value("Horas", max(d.desktime - d.productive, 0) / 3600))
+            BarMark(x: .value("Día", d.date, unit: .day), y: .value("Horas", max(d.desktime - d.productive, 0) / 3600))
                 .foregroundStyle(Color.secondary.opacity(0.35 * opacity(d)))
-                .cornerRadius(3)
+                .cornerRadius(days.count > 31 ? 1 : 3)
         }
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { v in
@@ -729,7 +966,21 @@ struct WeekTab: View {
                 }
             }
         }
-        .chartXAxis { AxisMarks { _ in AxisValueLabel().font(.system(size: 10)) } }
+        .chartXAxis {
+            if days.count <= 7 {
+                AxisMarks(values: .stride(by: .day)) { v in
+                    AxisValueLabel {
+                        if let d = v.as(Date.self) { Text(Fmt.weekdayShort(d)).font(.system(size: 10)) }
+                    }
+                }
+            } else {
+                AxisMarks(values: .automatic(desiredCount: 5)) { v in
+                    AxisValueLabel {
+                        if let d = v.as(Date.self) { Text(Fmt.shortDay(d)).font(.system(size: 9)) }
+                    }
+                }
+            }
+        }
         .chartOverlay { proxy in
             GeometryReader { geo in
                 Rectangle().fill(.clear).contentShape(Rectangle())
@@ -748,13 +999,13 @@ struct WeekTab: View {
     }
 
     @ViewBuilder private var detail: some View {
-        let focus = store.week.first { $0.date == hovered }
-            ?? store.week.first { Calendar.current.isDate($0.date, inSameDayAs: store.date) }
+        let focus = days.first { $0.date == hovered }
+            ?? (store.period == .week ? days.first { cal.isDate($0.date, inSameDayAs: store.date) } : nil)
         if let d = focus {
             HStack(alignment: .firstTextBaseline) {
                 Text(Fmt.longDay(d.date)).font(.system(size: 11, weight: .semibold))
                 Text(d.isFuture ? "Todavía no ha llegado" : d.desktime == 0 ? "Sin actividad"
-                     : "\(Fmt.duration(d.desktime)) trabajado · \(Fmt.duration(d.productive)) prod.")
+                     : "\(Fmt.duration(d.desktime)) · \(Fmt.duration(d.productive)) prod.")
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -765,19 +1016,23 @@ struct WeekTab: View {
                         .foregroundStyle(Theme.brand)
                 }
             }
+        } else {
+            Text("Pasa por encima de un día para verlo; haz clic para abrirlo.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }
 
     private func opacity(_ d: WeekDay) -> Double {
-        if let h = hovered { return h == d.date ? 1 : 0.3 }
-        return Calendar.current.isDate(d.date, inSameDayAs: store.date) ? 1 : 0.4
+        if let h = hovered { return cal.isDate(h, inSameDayAs: d.date) ? 1 : 0.3 }
+        if store.period == .week { return cal.isDate(d.date, inSameDayAs: store.date) ? 1 : 0.4 }
+        return 0.85
     }
 
     private func day(at p: CGPoint, proxy: ChartProxy, geo: GeometryProxy) -> WeekDay? {
         guard let plot = proxy.plotFrame else { return nil }
         let x = p.x - geo[plot].origin.x
-        guard let label: String = proxy.value(atX: x) else { return nil }
-        return store.week.first { $0.label == label }
+        guard let date: Date = proxy.value(atX: x) else { return nil }
+        return days.first { cal.isDate($0.date, inSameDayAs: date) }
     }
 }
 
@@ -1055,7 +1310,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
 
     /// Hands focus back to the previous app; while this app stays active the
     /// system keeps an auto-hiding menu bar on screen.
+    func popoverWillShow(_ notification: Notification) {
+        PopoverVisibility.shared.visible = true
+    }
+
     func popoverDidClose(_ notification: Notification) {
+        PopoverVisibility.shared.visible = false
+        store.album.dropFinishedOpening()
         if settingsWindow == nil { NSApp.deactivate() }
     }
 }
@@ -1065,6 +1326,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
 @main
 enum Main {
     static func main() {
+        if CommandLine.arguments.contains("--selftest") {
+            let code = MainActor.assumeIsolated { SelfTest.run() }
+            exit(code)
+        }
         let args = CommandLine.arguments
         let demo = args.contains("--demo")
 
@@ -1084,10 +1349,100 @@ enum Main {
     @MainActor
     static func snapshot(to path: String, demo: Bool, week: Bool, dark: Bool) {
         isSnapshotRender = true
+        if let i = CommandLine.arguments.firstIndex(of: "--oro-pares"), i + 1 < CommandLine.arguments.count {
+            // For each poster or photo card: original | gold cut-out | gold frame, to review them one by one.
+            let dir = CommandLine.arguments[i + 1]
+            Posters.prefetchForSnapshot()
+            for c in allCards where !c.art.isDrawn {
+                if case .logo = c.art { continue }
+                guard let img = Posters.cached(c), let tiff = img.tiffRepresentation, let ci = CIImage(data: tiff),
+                      let cg = CIContext().createCGImage(ci, from: ci.extent) else { continue }
+                let ctx = CIContext()
+                let cut = ArtEffects.goldCutout(ci, cg, force: true).flatMap { ctx.createCGImage($0, from: ci.extent) }
+                let auto = ArtEffects.goldCutout(ci, cg) != nil
+                let frame = ctx.createCGImage(ArtEffects.goldFrame(ci), from: ci.extent)
+                let w = 240.0, h = 360.0
+                let out = NSImage(size: NSSize(width: w * 3 + 40, height: h + 30))
+                out.lockFocus()
+                NSColor.darkGray.setFill(); NSRect(origin: .zero, size: out.size).fill()
+                img.draw(in: NSRect(x: 10, y: 10, width: w, height: h))
+                if let cut { NSImage(cgImage: cut, size: img.size).draw(in: NSRect(x: 20 + w, y: 10, width: w, height: h)) }
+                if let frame { NSImage(cgImage: frame, size: img.size).draw(in: NSRect(x: 30 + w * 2, y: 10, width: w, height: h)) }
+                ("\(c.id) · original | recorte\(auto ? "" : " (auto: no)") | marco" as NSString).draw(at: NSPoint(x: 10, y: h + 12),
+                    withAttributes: [.font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.yellow])
+                out.unlockFocus()
+                if let t = out.tiffRepresentation, let rep = NSBitmapImageRep(data: t),
+                   let jpg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) {
+                    try? jpg.write(to: URL(fileURLWithPath: "\(dir)/\(c.id).jpg"))
+                }
+            }
+            print("done"); exit(0)
+        }
+        if CommandLine.arguments.contains("--info") {
+            let album = Album(persist: false); album.loadDemo()
+            let dark = CommandLine.arguments.contains("--dark")
+            let view = OddsSheet(model: album).padding(16).frame(width: 360)
+                .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, dark ? .dark : .light)
+            let r = ImageRenderer(content: view); r.scale = 2
+            if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) { try? png.write(to: URL(fileURLWithPath: path)) }
+            print("wrote \(path)"); exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--rejilla"), i + 1 < CommandLine.arguments.count {
+            // Every card of a category, as the app draws it, to review them at a glance.
+            let set = CommandLine.arguments[i + 1]
+            Posters.prefetchForSnapshot()
+            let artArg = CommandLine.arguments.firstIndex(of: "--arte").map { CommandLine.arguments[$0 + 1] }
+            let gridArt = artArg.flatMap(Art.init(rawValue:)) ?? .base
+            let finishArg = CommandLine.arguments.firstIndex(of: "--acabado").map { CommandLine.arguments[$0 + 1] }
+            let gridFinish = finishArg.flatMap(Finish.init(rawValue:)) ?? .normal
+            let from = CommandLine.arguments.firstIndex(of: "--desde").map { Int(CommandLine.arguments[$0 + 1]) ?? 0 } ?? 0
+            let cards = Array(allCards.filter { $0.set == set }.dropFirst(from).prefix(40))
+            let view = LazyVGrid(columns: Array(repeating: GridItem(.fixed(110), spacing: 8), count: 10), spacing: 8) {
+                ForEach(cards) { c in
+                    VStack(spacing: 2) {
+                        CardFace(card: c, art: gridArt, finish: gridFinish, width: 110)
+                        Text(c.id).font(.system(size: 8)).foregroundStyle(.red).lineLimit(1)
+                    }
+                }
+            }
+            .padding(10).background(Color.gray.opacity(0.25)).environment(\.colorScheme, .dark)
+            let r = ImageRenderer(content: view); r.scale = 1.5
+            if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) { try? png.write(to: URL(fileURLWithPath: path)) }
+            print("wrote \(path)"); exit(0)
+        }
         let store = Store(demo: demo)
-        if week { store.tab = .week }
+        if week { store.period = .week }
+        if CommandLine.arguments.contains("--rango") {
+            let today = Calendar.current.startOfDay(for: Date())
+            store.period = .range(Calendar.current.date(byAdding: .day, value: -29, to: today)!, today)
+        }
+        if CommandLine.arguments.contains("--menu-periodo") { PeriodMenu.snapshotOpen = true }
         if CommandLine.arguments.contains("--apps") { store.tab = .apps }
         if CommandLine.arguments.contains("--logros") { store.tab = .achievements; store.achievements.loadDemo() }
+        if CommandLine.arguments.contains("--album") {
+            store.tab = .album
+            store.album.loadDemo(); store.achievements.loadDemo()
+            Posters.prefetchForSnapshot(arts: true)
+            func arg(_ name: String) -> String? {
+                guard let i = CommandLine.arguments.firstIndex(of: name), i + 1 < CommandLine.arguments.count else { return nil }
+                return CommandLine.arguments[i + 1]
+            }
+            if let s = arg("--section") { AlbumTab.snapshotSection = s }
+            if let d = arg("--carta") { AlbumTab.snapshotDetail = d }
+            if CommandLine.arguments.contains("--bienvenida") { AlbumTab.snapshotOnboarding = true }
+            if let p = arg("--abrir") {
+                PackOpening.snapshotStage = arg("--paso") ?? ""
+                switch PackOpening.snapshotStage {
+                case "girada": PackOpening.snapshotFlipped = [0, 1, 2]
+                case "resumen": PackOpening.snapshotFlipped = Set(0..<pack(p).count)
+                default: break
+                }
+                store.album.openFree(pack(p))
+                if store.album.opening == nil { store.album.buy(pack(p)) }
+            }
+        }
         Task { @MainActor in
             await store.refresh()
             let view = WidgetView(store: store, snapshot: true)

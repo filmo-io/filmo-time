@@ -146,7 +146,7 @@ Clic derecho en el icono **F** → **Salir**, y borra **Filmo Time** de Aplicaci
 <details>
 <summary><b>Privacidad</b></summary>
 
-Tu API key se guarda en un archivo de tu Mac que solo puede leer tu usuario (`~/Library/Application Support/DeskTimeWidget/apikey`). La app solo se conecta a `desktime.com`. No envía datos a ningún otro sitio.
+Tu API key se guarda en un archivo de tu Mac que solo puede leer tu usuario (`~/Library/Application Support/DeskTimeWidget/apikey`). Tus datos solo viajan a `desktime.com`, con tu API key. Además, la app descarga sin enviar nada tuyo las imágenes de los cromos (pósters de TMDB, fotos de Wikimedia Commons y logos de webs públicas) y busca actualizaciones en GitHub.
 </details>
 
 ---
@@ -164,8 +164,8 @@ Compilar requiere Xcode (o sus herramientas de línea de comandos) y un certific
 ### Publicar una versión
 
 ```bash
-VERSION=1.1.12 ./build.sh --dmg
-gh release create v1.1.12 dist/Filmo-Time.dmg --title "Filmo Time 1.1.12" --notes "Qué cambia"
+VERSION=1.2.1 ./build.sh --dmg
+gh release create v1.2.1 dist/Filmo-Time.dmg --title "Filmo Time 1.2.1" --notes "Qué cambia"
 ```
 
 - La etiqueta tiene que ser `v` + la misma versión (`v1.1.12`) y el archivo adjunto llamarse `Filmo-Time.dmg`.

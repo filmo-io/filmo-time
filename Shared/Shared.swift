@@ -330,13 +330,26 @@ extension DeskTimeAPI {
     /// Monday-to-Sunday summary of the week containing `around`. Days already in
     /// `known` (past days do not change) and today, when given, cost no request.
     func week(around: Date, today: DayData? = nil, known: [String: WeekDay] = [:]) async throws -> [WeekDay] {
-        var cal = Calendar(identifier: .gregorian)
-        cal.firstWeekday = 2
-        let start = cal.dateInterval(of: .weekOfYear, for: around)!.start
-        let days = (0..<7).map { cal.date(byAdding: .day, value: $0, to: start)! }
+        try await days(Fmt.weekDates(around: around), today: today, known: known)
+    }
+
+    /// Summary of each of these days, same rules as `week`.
+    func days(_ dates: [Date], today: DayData? = nil, known: [String: WeekDay] = [:]) async throws -> [WeekDay] {
+        // A few days at a time: a 90-day range must not fire 90 requests at once.
+        var out: [WeekDay] = []
+        var i = 0
+        while i < dates.count {
+            let chunk = Array(dates[i..<min(i + 6, dates.count)])
+            out += try await daysAtOnce(chunk, today: today, known: known)
+            i += 6
+        }
+        return out.sorted { $0.date < $1.date }
+    }
+
+    private func daysAtOnce(_ dates: [Date], today: DayData?, known: [String: WeekDay]) async throws -> [WeekDay] {
         let now = Date()
         return try await withThrowingTaskGroup(of: WeekDay.self) { group in
-            for d in days {
+            for d in dates {
                 group.addTask {
                     if d > now { return WeekDay(date: d, isFuture: true) }
                     if let t = today, Calendar.current.isDateInToday(d) {
@@ -356,6 +369,33 @@ extension DeskTimeAPI {
             for try await w in group { out.append(w) }
             return out.sorted { $0.date < $1.date }
         }
+    }
+}
+
+extension Fmt {
+    /// Monday to Sunday of the week containing `around`.
+    static func weekDates(around: Date) -> [Date] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        let start = cal.dateInterval(of: .weekOfYear, for: around)!.start
+        return (0..<7).map { cal.date(byAdding: .day, value: $0, to: start)! }
+    }
+
+    /// Every day from `from` to `to`, both included.
+    static func dates(from: Date, to: Date) -> [Date] {
+        let cal = Calendar.current
+        var d = cal.startOfDay(for: min(from, to)), out: [Date] = []
+        let end = cal.startOfDay(for: max(from, to))
+        while d <= end { out.append(d); d = cal.date(byAdding: .day, value: 1, to: d)! }
+        return out
+    }
+
+    /// "3 nov".
+    static func shortDay(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "es_ES")
+        f.dateFormat = "d MMM"
+        return f.string(from: d).replacingOccurrences(of: ".", with: "")
     }
 }
 
@@ -547,6 +587,19 @@ enum Demo {
         d.apps = p.map { AppUsage(id: "p\($0.0)", name: $0.0, isWeb: $0.2, seconds: $0.1, kind: .productive) }
             + n.map { AppUsage(id: "n\($0.0)", name: $0.0, isWeb: $0.2, seconds: $0.1, kind: .neutral) }
         return d
+    }
+
+    /// Made-up but stable figures for any list of days.
+    static func days(_ dates: [Date]) -> [WeekDay] {
+        dates.map { d in
+            let wd = Calendar.current.component(.weekday, from: d)
+            let n = Double(Calendar.current.ordinality(of: .day, in: .era, for: d) ?? 0)
+            if d > Date() { return WeekDay(date: d, isFuture: true) }
+            if wd == 1 || wd == 7 { return WeekDay(date: d) }
+            let desk = (6.2 + 1.6 * abs(sin(n * 1.7))) * 3600
+            let prod = 70 + 20 * abs(cos(n * 2.3))
+            return WeekDay(date: d, productive: desk * prod / 100, desktime: desk, productivity: prod, efficiency: desk * prod / 100 / 324)
+        }
     }
 
     static func week(around date: Date) -> [WeekDay] {
