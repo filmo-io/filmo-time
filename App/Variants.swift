@@ -57,7 +57,7 @@ enum Finish: String, Codable, CaseIterable, Comparable {
     }
 
     /// Repeats with a finish are worth more Tokens.
-    var tokenFactor: Int { [1, 2, 5][Finish.allCases.firstIndex(of: self)!] }
+    var tokenFactor: Int { [1, 4, 25][Finish.allCases.firstIndex(of: self)!] }
 
     static func roll() -> Finish {
         let r = Double.random(in: 0..<1)

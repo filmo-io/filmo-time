@@ -156,7 +156,9 @@ final class Album: ObservableObject {
     static let daysPerFreePack = 5
     static let fullDay: Double = 7 * 3600
     /// Chance a repeat brings an art variant you don't have yet.
-    static let artChance = 0.3
+    static let artChance = 0.5
+    /// Chance a card you didn't have comes straight in a variant art (you keep the classic one too).
+    static let newArtChance = 0.2
     static let prestigeTokens = 20
 
     init(persist: Bool) {
@@ -431,8 +433,15 @@ final class Album: ObservableObject {
 
     private func add(_ card: CardDef, finish: Finish) -> Pull {
         guard var owned = state.cards[card.id] else {
-            state.cards[card.id] = OwnedCard(count: 1, first: Date(), finish: finish)
-            return Pull(card: card, art: .base, finish: finish, isNew: true)
+            var fresh = OwnedCard(count: 1, first: Date(), finish: finish)
+            var art = Art.base
+            if Double.random(in: 0..<1) < Self.newArtChance, let a = randomMissingArt(card, fresh) {
+                fresh.arts.insert(a)
+                fresh.shownArt = a
+                art = a
+            }
+            state.cards[card.id] = fresh
+            return Pull(card: card, art: art, finish: finish, isNew: true, newArt: art == .base ? nil : art)
         }
         owned.count += 1
         defer { state.cards[card.id] = owned }
@@ -442,13 +451,16 @@ final class Album: ObservableObject {
             if finish > owned.shownFinish { owned.shownFinish = finish }
             return Pull(card: card, art: owned.shownArt, finish: finish, isNew: false, newFinish: finish)
         }
+        // A repeated holo or gold always pays, and well; a plain repeat pays only if it brings no variant.
+        var newArt: Art?
         if Double.random(in: 0..<1) < Self.artChance, let art = randomMissingArt(card, owned) {
             owned.arts.insert(art)
-            return Pull(card: card, art: art, finish: owned.shownFinish, isNew: false, newArt: art)
+            newArt = art
+            if finish == .normal { return Pull(card: card, art: art, finish: owned.shownFinish, isNew: false, newArt: art) }
         }
         let tokens = card.rarity.tokens * finish.tokenFactor
         state.tokens += tokens
-        return Pull(card: card, art: owned.shownArt, finish: finish, isNew: false, tokens: tokens)
+        return Pull(card: card, art: newArt ?? owned.shownArt, finish: finish, isNew: false, newArt: newArt, tokens: tokens)
     }
 
     private func randomMissingArt(_ card: CardDef, _ owned: OwnedCard) -> Art? {
@@ -664,7 +676,12 @@ enum Posters {
 
     private static var dir: URL { KeyStore.fileURL.deletingLastPathComponent().appendingPathComponent("posters", isDirectory: true) }
     private static func key(_ c: CardDef, _ a: Art) -> String { a == .base ? c.id : "\(c.id)-\(a.rawValue)" }
-    private static func file(_ c: CardDef, _ a: Art) -> URL { dir.appendingPathComponent("\(key(c, a)).jpg") }
+    /// A variant's file carries a tag of its source, so a replaced art is downloaded again instead of read stale.
+    private static func file(_ c: CardDef, _ a: Art) -> URL {
+        guard a != .base else { return dir.appendingPathComponent("\(key(c, a)).jpg") }
+        let tag = c.imageURL(a).deletingPathExtension().lastPathComponent.suffix(8)
+        return dir.appendingPathComponent("\(key(c, a))-\(tag).jpg")
+    }
 
     private static func remember(_ i: NSImage, _ k: String) {
         let px = i.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? Int(i.size.width * i.size.height)
@@ -730,6 +747,8 @@ enum Posters {
                     try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                     guard let p = Prepared.from(data: d, logo: logo) else { return nil }
                     try? d.write(to: target, options: .atomic)
+                    // The file this art had before its name carried the tag.
+                    if a != .base { try? FileManager.default.removeItem(at: target.deletingLastPathComponent().appendingPathComponent("\(k).jpg")) }
                     return p
                 }).value
                 guard let p else { return nil }
@@ -761,6 +780,25 @@ enum Posters {
         guard goldCutouts.contains(c.id), let src = await load(c, a) else { return nil }
         let id = c.id
         let i = await Task.detached(priority: .utility) { ArtEffects.goldBackground(src, id: id) }.value
+        if let i { remember(i, k) }
+        return i
+    }
+
+    /// The art toned for gold leaf, from memory only; snapshots, which render synchronously, tone it on the spot.
+    static func cachedGilt(_ c: CardDef, _ a: Art) -> NSImage? {
+        let k = key(c, a) + "-gilt"
+        if let i = memory.object(forKey: k as NSString) { return i }
+        guard isSnapshotRender, let src = cached(c, a), let i = GoldTone.toned(src) else { return nil }
+        remember(i, k)
+        return i
+    }
+
+    /// Tones the art for gold leaf once, off the main thread.
+    static func loadGilt(_ c: CardDef, _ a: Art) async -> NSImage? {
+        let k = key(c, a) + "-gilt"
+        if let i = memory.object(forKey: k as NSString) { return i }
+        guard let src = await load(c, a) else { return nil }
+        let i = await Task.detached(priority: .userInitiated) { GoldTone.toned(src) }.value
         if let i { remember(i, k) }
         return i
     }
@@ -859,6 +897,9 @@ struct CardImage: View {
     var gold = false
     @State private var image: NSImage?
     @State private var failed = false
+    /// Inside gold leaf the art is shown toned, so dark or saturated art still reads in gold.
+    @Environment(\.gilded) private var gilded
+    @State private var gilt: NSImage?
 
     init(card: CardDef, art: Art = .base, fit: Bool = false, gold: Bool = false) {
         self.card = card
@@ -869,8 +910,9 @@ struct CardImage: View {
     }
 
     var body: some View {
+        let shown = gilded ? (gilt ?? Posters.cachedGilt(card, art) ?? image) : image
         ZStack {
-            if let image {
+            if let image = shown {
                 if fit { Image(nsImage: image).resizable().scaledToFit() } else { Image(nsImage: image).resizable().scaledToFill() }
             } else if fit {
                 // A logo that could not be loaded: its name as a wordmark.
@@ -881,6 +923,10 @@ struct CardImage: View {
                                                 startPoint: .top, endPoint: .bottom))
                 if !failed { ProgressView().controlSize(.mini) }
             }
+        }
+        .task(id: "\(card.id)-\(art.rawValue)-\(gilded)") {
+            gilt = nil
+            if gilded, let g = await Posters.loadGilt(card, art) { gilt = g }
         }
         .task(id: "\(card.id)-\(art.rawValue)-\(gold)") {
             // The same view can be asked for another art (or gold): always fetch the one asked for.
@@ -907,10 +953,8 @@ struct CardFace: View {
     var body: some View {
         Group {
             if finish == .gold {
-                // Gold: the card sits inside a thick frame of brushed gold, like a premium parallel.
-                GoldFrame(width: width) { w in
-                    CardFace(card: card, art: art, finish: .normal, width: w, inGold: true)
-                }
+                // Gold: the whole card is stamped in gold leaf.
+                GoldLeaf(width: width) { face(width) }
             } else if inGold {
                 face(width)
             } else {
@@ -963,80 +1007,197 @@ struct CardFace: View {
     }
 }
 
-/// A thick frame of brushed, bevelled gold around a card, with an engraved plaque and a slow sheen.
-struct GoldFrame<Content: View>: View {
+/// Gold finish: the whole card stamped in gold leaf, with a mirror rim and a hallmark.
+struct GoldLeaf<Content: View>: View {
     let width: CGFloat
-    @ViewBuilder let content: (CGFloat) -> Content
+    @ViewBuilder let content: () -> Content
 
     var body: some View {
         let r = width * 0.07
-        // Even-looking frame: sides and ends in the card's own 2:3 proportion.
-        let border = width * 0.065
-        let inner = width - border * 2
         ZStack {
-            BrushedGold()
-                .clipShape(RoundedRectangle(cornerRadius: r))
-            // Outer bevel: light on top-left, shade on bottom-right.
-            RoundedRectangle(cornerRadius: r)
-                .strokeBorder(LinearGradient(colors: [.white.opacity(0.85), hex(0xFFF2C2).opacity(0.3), hex(0x5A3A06).opacity(0.7)],
-                                             startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: max(width * 0.012, 1))
-            VStack(spacing: 0) {
-                content(inner)
-                    .frame(width: inner, height: inner * 1.5)
-                    .clipShape(RoundedRectangle(cornerRadius: r * 0.55))
-                    // Inner bevel: the card sits sunk into the gold.
-                    .overlay(RoundedRectangle(cornerRadius: r * 0.55)
-                        .strokeBorder(LinearGradient(colors: [hex(0x4A2F05).opacity(0.9), hex(0xFFF2C2).opacity(0.9)],
-                                                     startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: max(width * 0.01, 1)))
-                    .shadow(color: hex(0x3A2400).opacity(0.5), radius: width * 0.012, x: 0, y: width * 0.006)
+            // The art in black and white, then inked in gold: lights turn to gold, shadows to bronze.
+            content().environment(\.gilded, true).saturation(0).contrast(1.35).brightness(0.06)
+            LinearGradient(stops: [.init(color: hex(0xFFF0A8), location: 0), .init(color: hex(0xF6C544), location: 0.38),
+                                   .init(color: hex(0xE3A21C), location: 0.7), .init(color: hex(0xF8D568), location: 1)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+                .blendMode(.multiply)
+            hex(0x3A2203).blendMode(.lighten)
+            GoldShine()
+        }
+        .compositingGroup()
+        .clipShape(RoundedRectangle(cornerRadius: r))
+        .overlay(RoundedRectangle(cornerRadius: r)
+            .strokeBorder(LinearGradient(colors: polishedGold, startPoint: .topLeading, endPoint: .bottomTrailing),
+                          lineWidth: max(width * 0.022, 1.5)))
+        .overlay(RoundedRectangle(cornerRadius: r * 0.66)
+            .strokeBorder(hex(0xFFEEAA).opacity(0.75), lineWidth: max(width * 0.005, 0.5))
+            .padding(width * 0.034))
+        .overlay(alignment: .bottom) {
+            if width >= 100 {
+                Text("DORADA").font(.system(size: width * 0.032, weight: .heavy)).tracking(width * 0.01)
+                    .foregroundStyle(hex(0x3D2503))
+                    .padding(.horizontal, width * 0.035).padding(.vertical, width * 0.012)
+                    .background(Capsule().fill(LinearGradient(colors: Array(polishedGold[1...5]), startPoint: .leading, endPoint: .trailing)))
+                    .overlay(Capsule().strokeBorder(hex(0x5A3A06), lineWidth: 0.6))
+                    .shadow(color: .black.opacity(0.5), radius: 1.5, y: 0.5)
+                    .padding(.bottom, width * 0.055)
             }
-            .frame(maxHeight: .infinity)
-            GoldSheen()
-                .clipShape(RoundedRectangle(cornerRadius: r))
         }
         .frame(width: width, height: width * 1.5)
     }
 }
 
-/// Brushed gold: a warm, smooth metal gradient with fine horizontal brushing.
-struct BrushedGold: View {
-    var body: some View {
-        ZStack {
-            LinearGradient(stops: [.init(color: hex(0xF6DC8A), location: 0), .init(color: hex(0xD7A63A), location: 0.32),
-                                   .init(color: hex(0xF3D27A), location: 0.55), .init(color: hex(0xB9852A), location: 0.8),
-                                   .init(color: hex(0xE2B95A), location: 1)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-            RadialGradient(colors: [.white.opacity(0.45), .clear], center: .init(x: 0.25, y: 0.12), startRadius: 0, endRadius: 140)
-                .blendMode(.softLight)
-            Canvas { ctx, size in
-                // Deterministic fine brushing lines.
-                var seed: UInt64 = 0x9E3779B97F4A7C15
-                func rnd() -> Double { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Double(seed >> 33) / Double(1 << 31) }
-                var y = 0.0
-                while y < size.height {
-                    let a = 0.05 + rnd() * 0.1
-                    let light = rnd() > 0.5
-                    ctx.fill(Path(CGRect(x: 0, y: y, width: size.width, height: 0.6)),
-                             with: .color(light ? .white.opacity(a) : hex(0x5A3A06).opacity(a * 0.8)))
-                    y += 0.9 + rnd() * 1.4
-                }
-            }
-        }
+private struct GildedKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    /// Inside gold leaf: images show their gold-toned version.
+    var gilded: Bool {
+        get { self[GildedKey.self] }
+        set { self[GildedKey.self] = newValue }
     }
 }
 
-/// A slow, soft glint that crosses a gold card.
-struct GoldSheen: View {
+/// Tones art for gold leaf. Gold multiplies a grey version of the art, so dark art, and red or blue art
+/// (whose luma is low), came out as a brown slab. Dark art now counts its brightest channel too, and gets
+/// its own levels: the white point at its highlights (gain capped, so a black poster's noise stays black)
+/// and the midtones lifted when the whole image is still dark. Light art is left untouched, and art in
+/// between gets a share of both, so nothing jumps at a threshold.
+enum GoldTone {
+    static func toned(_ img: NSImage) -> NSImage? {
+        guard let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let w = cg.width, h = cg.height
+        guard w > 0, h > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let px = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        let n = w * h
+        // Rec. 709 luma on the encoded values: the grey SwiftUI's desaturation gives.
+        var luma = [Double](repeating: 0, count: n), peak = [Double](repeating: 0, count: n)
+        var sum = 0.0
+        for i in 0..<n {
+            let r = Double(px[i * 4]), g = Double(px[i * 4 + 1]), b = Double(px[i * 4 + 2])
+            luma[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            peak[i] = max(r, g, b)
+            sum += luma[i]
+        }
+        let t = need(meanLuma: sum / Double(n) / 255)
+        guard t > 0 else { return img }
+        var grey = [UInt8](repeating: 0, count: n)
+        var hist = [Int](repeating: 0, count: 256)
+        for i in 0..<n {
+            let v = UInt8(min(luma[i] + t * 0.5 * (peak[i] - luma[i]), 255).rounded())
+            grey[i] = v
+            hist[Int(v)] += 1
+        }
+        let map = levels(hist, count: n)
+        for i in 0..<n {
+            let v = luma[i] + t * (Double(map[Int(grey[i])]) - luma[i])
+            let out = UInt8(min(max(v, 0), 255).rounded() * Double(px[i * 4 + 3]) / 255)
+            px[i * 4] = out; px[i * 4 + 1] = out; px[i * 4 + 2] = out
+        }
+        guard let result = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: result, size: img.size)
+    }
+
+    /// How much an image needs toning, from its mean luma: fully at 0.25 or below, not at all from 0.45.
+    static func need(meanLuma: Double) -> Double {
+        min(max((0.45 - meanLuma) / 0.2, 0), 1)
+    }
+
+    /// The tone curve for one image, from the histogram of its grey.
+    static func levels(_ hist: [Int], count: Int) -> [UInt8] {
+        func percentile(_ p: Double) -> Double {
+            var seen = 0
+            for (v, k) in hist.enumerated() {
+                seen += k
+                if Double(seen) > Double(count) * p { return Double(v) / 255 }
+            }
+            return 1
+        }
+        // Black point only trims a raised floor, so light art never darkens; white point at the highlights.
+        let lo = min(percentile(0.01), 0.06)
+        let hi = max(percentile(0.99), lo + 0.4)
+        let stretch = { (v: Double) in min(max((v - lo) / (hi - lo), 0), 1) }
+        var mean = 0.0
+        for (v, k) in hist.enumerated() { mean += stretch(Double(v) / 255) * Double(k) }
+        mean /= Double(max(count, 1))
+        // Lift the midtones of dark art toward a mean of 0.35, with gamma at most 0.6.
+        let gamma = mean > 0.01 && mean < 0.35 ? max(log(0.35) / log(mean), 0.6) : 1
+        return (0..<256).map { UInt8((pow(stretch(Double($0) / 255), gamma) * 255).rounded()) }
+    }
+}
+
+/// The shine of gold leaf: foil grain, a bright band and gold dust that move with the tilt.
+struct GoldShine: View {
     @ObservedObject private var visibility = PopoverVisibility.shared
+    @Environment(\.holoTilt) private var tilt
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: isSnapshotRender || !visibility.visible)) { t in
-            let x = (t.date.timeIntervalSinceReferenceDate * 0.25).truncatingRemainder(dividingBy: 2.2) - 0.6
-            LinearGradient(stops: [.init(color: .clear, location: 0.40), .init(color: .white.opacity(0.35), location: 0.5),
-                                   .init(color: .clear, location: 0.60)],
-                           startPoint: UnitPoint(x: x - 0.5, y: 0), endPoint: UnitPoint(x: x + 0.5, y: 1))
-                .blendMode(.screen)
+        Group {
+            if let tilt {
+                GoldLayers(tilt: tilt)
+            } else {
+                TimelineView(.animation(minimumInterval: 1 / 30, paused: isSnapshotRender || !visibility.visible)) { t in
+                    let s = isSnapshotRender ? 0.9 : t.date.timeIntervalSinceReferenceDate
+                    GoldLayers(tilt: CGPoint(x: sin(s * 0.8) * 0.85, y: cos(s * 0.6) * 0.5))
+                }
+            }
         }
         .allowsHitTesting(false)
+    }
+}
+
+private struct GoldLayers: View {
+    let tilt: CGPoint
+
+    var body: some View {
+        ZStack {
+            // Foil grain: fine light and dark lines across the leaf.
+            Canvas { ctx, size in
+                let step = max(size.width / 34, 1.6)
+                var x = -size.height
+                var k = 0
+                while x < size.width + size.height {
+                    var line = Path()
+                    line.move(to: CGPoint(x: x, y: 0))
+                    line.addLine(to: CGPoint(x: x + size.height * 0.62, y: size.height))
+                    ctx.stroke(line, with: .color(k % 2 == 0 ? .white.opacity(0.5) : hex(0x3C1E00).opacity(0.35)),
+                               lineWidth: max(step * 0.2, 0.4))
+                    x += step
+                    k += 1
+                }
+            }
+            .blendMode(.overlay)
+            .opacity(0.5)
+            // The bright band that crosses the gold as the card leans.
+            LinearGradient(stops: [.init(color: .clear, location: 0.34), .init(color: hex(0xFFD978).opacity(0.35), location: 0.44),
+                                   .init(color: hex(0xFFF6D8).opacity(0.8), location: 0.5), .init(color: hex(0xFFD978).opacity(0.35), location: 0.56),
+                                   .init(color: .clear, location: 0.66)],
+                           startPoint: UnitPoint(x: -0.6 - tilt.x * 0.9, y: -0.3 - tilt.y * 0.6),
+                           endPoint: UnitPoint(x: 1.6 - tilt.x * 0.9, y: 1.3 - tilt.y * 0.6))
+                .blendMode(.plusLighter)
+                .opacity(0.55)
+            // Gold dust that lights up at different angles.
+            Canvas { ctx, size in
+                let count = min(Int(size.width * size.height / 70), 380)
+                var seed: UInt64 = 0xD1B54A32D192ED03
+                func next() -> CGFloat {
+                    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                    return CGFloat(seed >> 33) / CGFloat(UInt32.max >> 1)
+                }
+                let dot = max(size.width / 200, 0.45)
+                for _ in 0..<count {
+                    let px = next() * size.width, py = next() * size.height, phase = next() * 12
+                    let glow = sin(phase + tilt.x * 4 + tilt.y * 3)
+                    guard glow > 0.78 else { continue }
+                    let r = dot * (0.7 + (glow - 0.78) * 3)
+                    ctx.fill(Path(ellipseIn: CGRect(x: px - r, y: py - r, width: r * 2, height: r * 2)),
+                             with: .color(hex(0xFFF6D0).opacity(Double(glow - 0.78) * 3.5)))
+                }
+            }
+            .blendMode(.plusLighter)
+        }
     }
 }
 
@@ -1759,7 +1920,7 @@ struct AlbumTab: View {
     @ViewBuilder private func slot(_ c: CardDef) -> some View {
         if let o = model.owned(c) {
             CardFace(card: c, art: o.shownArt, finish: o.shownFinish, width: 54)
-                .modifier(HoloHoverTilt(enabled: o.shownFinish == .holo, maxAngle: 16))
+                .modifier(HoloHoverTilt(enabled: o.shownFinish != .normal, maxAngle: 16))
                 .overlay(alignment: .topLeading) {
                     if model.isUnseen(c) {
                         Text("NUEVO").font(.system(size: 7, weight: .heavy)).tracking(0.5)
@@ -2095,16 +2256,32 @@ struct PackOpening: View {
         .onTapGesture { withAnimation(.spring(duration: 0.45, bounce: 0.25)) { torn = true } }
     }
 
+    /// The pull in a slot; snapshots can force two variant arts to review how they are announced.
+    private func pull(_ i: Int) -> Pull {
+        guard PackOpening.snapshotStage == "variante", i < 2, let c = allCards.first(where: { $0.id == "padrino" }) else { return pulls[i] }
+        return Pull(card: c, art: i == 0 ? .alt : .scene, finish: .normal, isNew: i == 0, newArt: i == 0 ? .alt : .scene)
+    }
+
     private func card(_ i: Int) -> some View {
-        let p = pulls[i]
+        let p = pull(i)
         let isUp = flipped.contains(i)
         return ZStack {
+            if isUp, let a = p.newArt { ArtBurst(art: a, width: width) }
             CardBack(width: width, glow: hovered == i && !isUp ? p.card.rarity : nil)
                 .opacity(isUp ? 0 : 1)
             CardFace(card: p.card, art: p.art, finish: p.finish, width: width)
-                .modifier(HoloHoverTilt(enabled: isUp && p.finish == .holo))
+                .modifier(HoloHoverTilt(enabled: isUp && p.finish != .normal))
                 .rotation3DEffect(.degrees(180), axis: (0, 1, 0))
                 .opacity(isUp ? 1 : 0)
+                .overlay(alignment: .top) {
+                    if isUp, let a = p.newArt {
+                        ArtRibbon(art: a)
+                            .frame(maxWidth: width + 14)
+                            .rotation3DEffect(.degrees(180), axis: (0, 1, 0))
+                            .offset(y: -8)
+                            .transition(.scale(scale: 0.3).combined(with: .opacity))
+                    }
+                }
                 .overlay(alignment: .bottom) {
                     if isUp {
                         Group {
@@ -2135,7 +2312,9 @@ struct PackOpening: View {
         }
         .rotation3DEffect(.degrees(isUp ? 180 : 0), axis: (0, 1, 0), perspective: 0.5)
         .scaleEffect(hovered == i && !isUp ? 1.06 : 1)
-        .shadow(color: isUp && p.card.rarity >= .epic ? p.card.rarity.colors[0].opacity(0.7) : .clear, radius: 10)
+        .shadow(color: isUp && p.finish == .gold ? hex(0xFFCD5A).opacity(0.95)
+                : isUp && p.newArt != nil ? ArtRibbon.colors(p.newArt!)[0].opacity(0.85)
+                : isUp && p.card.rarity >= .epic ? p.card.rarity.colors[0].opacity(0.7) : .clear, radius: 10)
         .animation(.easeOut(duration: 0.15), value: hovered)
         .onHover { inside in hovered = inside ? i : (hovered == i ? nil : hovered) }
         .onTapGesture {
@@ -2151,7 +2330,7 @@ struct PackOpening: View {
     private func badge(_ p: Pull) -> String {
         if p.isNew { return p.finish == .normal ? "¡Nueva!" : "¡Nueva · \(p.finish.name.lowercased())!" }
         if let f = p.newFinish { return "¡\(f.name)!" }
-        if let a = p.newArt { return "¡\(a.name)!" }
+        if p.newArt != nil { return "¡Variante!" }
         return "+\(p.tokens) Tokens"
     }
 
@@ -2193,6 +2372,60 @@ struct PackOpening: View {
             }
             .buttonStyle(.plain)
         }
+    }
+}
+
+// MARK: - Variant art reveal
+
+/// The label a variant art wears when it comes out of a pack.
+private struct ArtRibbon: View {
+    let art: Art
+
+    static func colors(_ a: Art) -> [Color] { a == .scene ? [hex(0xFFB42E), hex(0xFF6A00)] : [hex(0xFF4F9A), hex(0x4FB8FF)] }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: art == .scene ? "film.fill" : "paintpalette.fill").font(.system(size: 7, weight: .bold))
+            Text(art == .scene ? "ESCENA MÍTICA" : "ALTERNATIVO")
+                .font(.system(size: 7, weight: .heavy)).tracking(0.5).lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(Capsule().fill(LinearGradient(colors: Self.colors(art), startPoint: .leading, endPoint: .trailing)))
+        .overlay(Capsule().strokeBorder(.white.opacity(0.7), lineWidth: 0.8))
+        .shadow(color: Self.colors(art)[0].opacity(0.9), radius: 5)
+    }
+}
+
+/// Rings and sparks that burst from a card when it turns out to be a variant art.
+private struct ArtBurst: View {
+    let art: Art
+    let width: CGFloat
+    @State private var out = false
+
+    var body: some View {
+        let colors = ArtRibbon.colors(art)
+        ZStack {
+            ForEach(0..<3, id: \.self) { k in
+                RoundedRectangle(cornerRadius: width * 0.07)
+                    .strokeBorder(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 2.5)
+                    .scaleEffect(out ? 1.3 + Double(k) * 0.22 : 1.04)
+                    .opacity(out ? 0 : 0.95)
+                    .animation(.easeOut(duration: 1.0).delay(Double(k) * 0.16), value: out)
+            }
+            ForEach(0..<10, id: \.self) { k in
+                let a = Double(k) / 10 * 2 * .pi + 0.3
+                Image(systemName: "sparkle").font(.system(size: k % 2 == 0 ? 10 : 7, weight: .bold))
+                    .foregroundStyle(k % 3 == 0 ? .white : colors[k % 2])
+                    .offset(x: cos(a) * width * (out ? 0.95 : 0.45), y: sin(a) * width * (out ? 1.2 : 0.7))
+                    .scaleEffect(out ? 0.2 : 1.2)
+                    .opacity(out ? 0 : 1)
+                    .animation(.easeOut(duration: 1.1).delay(0.04 * Double(k % 4)), value: out)
+            }
+        }
+        .frame(width: width, height: width * 1.5)
+        .allowsHitTesting(false)
+        .onAppear { if !isSnapshotRender { out = true } }
     }
 }
 
@@ -2317,11 +2550,22 @@ struct SceneFace: View {
                     sprockets
                 }
                 if let line = card.extras.sceneLine {
-                    Text(line).font(.system(size: max(width * 0.08, 6), weight: .semibold, design: .serif))
-                        .italic(line.hasPrefix("«"))
-                        .multilineTextAlignment(.center).lineLimit(4).minimumScaleFactor(0.6)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, width * 0.08)
+                    // A quote is said as in the film, with the Spanish underneath like a subtitle.
+                    let original = sceneOriginals[card.id]
+                    VStack(spacing: width * 0.025) {
+                        Text(original.map { "«\($0)»" } ?? line)
+                            .font(.system(size: max(width * 0.08, 6), weight: .semibold, design: .serif))
+                            .italic(line.hasPrefix("«"))
+                            .multilineTextAlignment(.center).lineLimit(original == nil ? 4 : 3).minimumScaleFactor(0.6)
+                            .foregroundStyle(.white)
+                        if original != nil {
+                            Text(line.trimmingCharacters(in: CharacterSet(charactersIn: "«»")))
+                                .font(.system(size: max(width * 0.052, 4.5))).italic()
+                                .multilineTextAlignment(.center).lineLimit(3).minimumScaleFactor(0.7)
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                    }
+                    .padding(.horizontal, width * 0.08)
                 }
                 Spacer(minLength: 0)
                 Text(card.title.uppercased()).font(.system(size: max(width * 0.05, 4.5), weight: .bold)).tracking(0.8)
@@ -2502,7 +2746,8 @@ struct OddsSheet: View {
             Divider()
             line("Gratis", "Un sobre al día por jornada de 7 h y un Seed cada 5.")
             line("Acabados", "Holográfica 5 %, dorada 0,3 %.")
-            line("Repetidas", "Dan Tokens para fabricar el cromo que te falte, o desbloquean otra variante.")
+            line("Variantes", "1 de cada 5 cromos nuevos con variantes sale ya en arte alternativo o escena mítica; una repetida la desbloquea la mitad de las veces.")
+            line("Repetidas", "Si no traen variante, dan Tokens para fabricar el cromo que te falte: más cuanto más rara. Una holográfica repetida vale ×4 y una dorada ×25, siempre.")
             line("Pirámide", "Las rarezas altas llegan cuando tienes la base: nunca vas más avanzado en una rareza que en la de debajo.")
             VStack(alignment: .leading, spacing: 6) {
                 line("Garantía de legendaria", "Si llevas mala racha, la siguiente acaba siendo segura.")

@@ -1435,7 +1435,7 @@ enum Main {
             if let p = arg("--abrir") {
                 PackOpening.snapshotStage = arg("--paso") ?? ""
                 switch PackOpening.snapshotStage {
-                case "girada": PackOpening.snapshotFlipped = [0, 1, 2]
+                case "girada", "variante": PackOpening.snapshotFlipped = [0, 1, 2]
                 case "resumen": PackOpening.snapshotFlipped = Set(0..<pack(p).count)
                 default: break
                 }
