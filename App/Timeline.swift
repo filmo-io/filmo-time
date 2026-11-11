@@ -44,7 +44,7 @@ enum WorkTimeline {
     }()
 
     static func record(_ d: DayData, now: Date = Date()) {
-        guard let key = d.arrivedDay, d.arrived != nil, let t = minutes(since: key, to: now) else { return }
+        guard let key = d.arrivedDay, d.arrived != nil, let t = elapsed(since: key, to: now) else { return }
         var list = days[key] ?? []
         if let last = list.last, t < last.t + 0.5 { return }
         list.append(Sample(t: t, p: d.productive, n: d.neutralTime, u: d.unproductiveTime))
@@ -53,13 +53,22 @@ enum WorkTimeline {
         if let data = try? JSONEncoder().encode(days) { try? data.write(to: url, options: .atomic) }
     }
 
-    private static func minutes(since day: String, to now: Date) -> Double? {
+    private static func elapsed(since day: String, to now: Date) -> Double? {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
         return f.date(from: day).map { now.timeIntervalSince($0) / 60 }
     }
 
     static func samples(for d: DayData) -> [Sample] { d.arrivedDay.flatMap { days[$0] } ?? [] }
+
+    /// A day's columns from its arrival until `to` minutes (or until it left), for the achievements.
+    static func columns(for d: DayData, to: Double?, open: Bool) -> [Column] {
+        guard let from = minutes(d.arrived), var end = to ?? minutes(d.left) else { return [] }
+        if end < from { end += 1440 }
+        guard end > from else { return [] }
+        return columns(samples(for: d), totals: Sample(t: end, p: d.productive, n: d.neutralTime, u: d.unproductiveTime),
+                       from: from, to: end, open: open)
+    }
 
     /// The day in order: one column per gap between two notes (five minutes while the app is
     /// running), like DeskTime's own productivity bar. `open` leaves out the time after the last
@@ -98,5 +107,55 @@ enum WorkTimeline {
             i += 1
         }
         return out
+    }
+}
+
+// MARK: - Reading the day
+
+extension Array where Element == WorkTimeline.Column {
+    /// A whole hour away from the keyboard between 15:00 and 17:00, having worked before and after it.
+    var hadSiesta: Bool {
+        let window = 900.0...1020.0
+        var idle = 0.0, end = 0.0, found = false
+        for c in self where c.to > window.lowerBound && c.from < window.upperBound {
+            // A stretch nobody watched is not a nap.
+            if c.loose || c.seconds.reduce(0, +) >= 10 { idle = 0; continue }
+            idle += Swift.min(c.to, window.upperBound) - Swift.max(c.from, window.lowerBound)
+            if idle >= 60 { found = true; end = c.to }
+        }
+        guard found else { return false }
+        let worked = { (c: WorkTimeline.Column) in c.seconds.reduce(0, +) >= 60 }
+        return contains { $0.to <= window.lowerBound && worked($0) } && contains { $0.from >= end && worked($0) }
+    }
+
+    /// Work blocks of about 25 minutes in a row, each followed by a short break. Four make a Pomodoro session.
+    var pomodoros: Int {
+        // Runs of work and rest, in minutes; anything in between, or unwatched, breaks the chain.
+        var runs: [(work: Bool?, minutes: Double)] = []
+        for c in self {
+            let kind: Bool? = c.loose ? nil : c.active >= 0.6 ? true : c.active <= 0.15 ? false : nil
+            if let last = runs.last, last.work == kind, kind != nil {
+                runs[runs.count - 1].minutes += c.to - c.from
+            } else {
+                runs.append((kind, c.to - c.from))
+            }
+        }
+        var best = 0, chain = 0
+        for (i, r) in runs.enumerated() {
+            guard r.work == true, (18...35).contains(r.minutes) else { if r.work != false { chain = 0 }; continue }
+            let rested = i >= 2 && runs[i - 1].work == false && (3...12).contains(runs[i - 1].minutes) && runs[i - 2].work == true
+            chain = rested && chain > 0 ? chain + 1 : 1
+            best = Swift.max(best, chain)
+        }
+        return best
+    }
+}
+
+extension Array where Element == WorkTimeline.Sample {
+    /// Productivity around 13:00, 0 to 100, once at least an hour had been tracked by then.
+    var middayProductivity: Double? {
+        guard let s = filter({ (750...810).contains($0.t) }).min(by: { abs($0.t - 780) < abs($1.t - 780) }) else { return nil }
+        let tracked = s.p + s.n + s.u
+        return tracked >= 3600 ? s.p / tracked * 100 : nil
     }
 }

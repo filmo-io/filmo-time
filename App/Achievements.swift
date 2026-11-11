@@ -18,6 +18,9 @@ struct AchievementContext {
     var pausesToday = 0
     /// The day Filmo Time first ran: DeskTime may only have tracked part of it.
     let isFirstDay: Bool
+    /// The day as this Mac saw it, in five-minute steps; empty when the app was not running.
+    var columns: [WorkTimeline.Column] = []
+    var samples: [WorkTimeline.Sample] = []
 
     var calendar: Calendar { Calendar(identifier: .gregorian) }
     var hour: Int { calendar.component(.hour, from: now) }
@@ -69,6 +72,7 @@ enum AppKeys {
     static let video = ["youtube", "netflix", "twitch", "primevideo", "disneyplus", "hbomax", "max.com"]
     static let music = ["spotify", "music"]
     static let amazon = ["amazon.es", "amazon.com", "amazon.co.uk"]
+    static let jobs = ["linkedin", "infojobs", "indeed.com", "glassdoor"]
     static let deskTime = ["desktime.com"]
     /// DeskTime reports Google Slides as docs.google.com, the same as Docs, so it cannot be told apart.
     static let presentations = ["powerpoint", "keynote", "slides.google.com", "pitch.com", "canva.com", "prezi.com"]
@@ -103,8 +107,8 @@ func anyAchievement(_ id: String) -> Achievement? {
 let standardAchievements: [Achievement] = [
     // Yours
     Achievement(id: "ai-addict", emoji: "🤖", title: "AI addict",
-                detail: "Más del 80 % de una jornada completa en Claude (o similar). ¿Quién trabaja para quién?") {
-        $0.worked >= fullDay && $0.share(AppKeys.ai) > 0.8
+                detail: "Más del 75 % de una jornada completa en Claude (o similar). ¿Quién trabaja para quién?") {
+        $0.worked >= fullDay && $0.share(AppKeys.ai) > 0.75
     },
     Achievement(id: "aguafiestas", emoji: "🍺", title: "Aguafiestas…",
                 detail: "Usaste Claude (o similar) un primer viernes de mes después de las 19:00. Las cervezas no se beben solas.") { c in
@@ -113,8 +117,8 @@ let standardAchievements: [Achievement] = [
         return c.today.seconds(matching: AppKeys.ai) > prev.seconds(matching: AppKeys.ai)
     },
     Achievement(id: "community-manager", emoji: "📱", title: "Community manager",
-                detail: "Más de la mitad de una jornada completa en redes sociales. Seguro que era networking.") {
-        $0.worked >= fullDay && $0.share(AppKeys.social) > 0.5
+                detail: "Una hora o más en redes sociales en un día. Seguro que era networking.") {
+        $0.today.seconds(matching: AppKeys.social) >= hour
     },
 
     // Schedule
@@ -201,20 +205,20 @@ let standardAchievements: [Achievement] = [
         $0.today.seconds(matching: AppKeys.chat) > 3 * hour
     },
     Achievement(id: "hacker", emoji: "💻", title: "Hacker de Hollywood",
-                detail: "Más de 5 horas en el terminal o el editor. Estoy dentro.") {
-        $0.today.seconds(matching: AppKeys.code) > 5 * hour
+                detail: "Más de 3 horas en el terminal o el editor. Estoy dentro.") {
+        $0.today.seconds(matching: AppKeys.code) > 3 * hour
     },
     Achievement(id: "ofimatico", emoji: "📊", title: "Ofimático legendario",
-                detail: "Más de 4 horas en documentos, hojas de cálculo o presentaciones. Esa fórmula no se arregla sola.") {
-        $0.today.seconds(matching: AppKeys.office) > 4 * hour
+                detail: "Más de una hora en documentos, hojas de cálculo o presentaciones. Esa fórmula no se arregla sola.") {
+        $0.today.seconds(matching: AppKeys.office) > hour
     },
     Achievement(id: "capitulo", emoji: "📺", title: "Solo un capítulo más",
-                detail: "Más de 2 horas en YouTube, Netflix o Twitch. Era un tutorial, seguro.") {
-        $0.today.seconds(matching: AppKeys.video) > 2 * hour
+                detail: "Más de una hora en YouTube, Netflix o Twitch. Era un tutorial, seguro.") {
+        $0.today.seconds(matching: AppKeys.video) > hour
     },
     Achievement(id: "dj", emoji: "🎧", title: "DJ de oficina",
-                detail: "Más de 5 horas con Spotify o Música. Pon algo bueno.") {
-        $0.today.seconds(matching: AppKeys.music) > 5 * hour
+                detail: "Más de media hora con Spotify o Música. Pon algo bueno.") {
+        $0.today.seconds(matching: AppKeys.music) > 30 * 60
     },
     Achievement(id: "prime", emoji: "🛒", title: "Prime time",
                 detail: "Más de una hora en Amazon en horario laboral. Era material de oficina.") {
@@ -251,6 +255,31 @@ let standardAchievements: [Achievement] = [
                 detail: "Más de 10 minutos en webs de la competencia en un día. Lo llamaremos benchmarking.") {
         $0.today.seconds(matching: AppKeys.competitors) > 10 * 60
     },
+
+    Achievement(id: "open-to-work", emoji: "💼", title: "Open to work",
+                detail: "Más de 20 minutos en LinkedIn o InfoJobs en un día. Tu jefe también tiene Filmo Time.") {
+        $0.today.seconds(matching: AppKeys.jobs) > 20 * 60
+    },
+    Achievement(id: "siesta", emoji: "😴", title: "La siesta",
+                detail: "Una hora entera sin tocar el ordenador entre las 15:00 y las 17:00. Tradición es tradición.") {
+        $0.columns.hadSiesta
+    },
+    Achievement(id: "esquirol", emoji: "🐿️", title: "Esquirol",
+                detail: "Trabajaste el 11 de noviembre de 2026, día de huelga general. El piquete te vio entrar.") { c in
+        isGeneralStrike(c.now, c.calendar) && c.worked > 0
+    },
+
+    Achievement(id: "remontada", emoji: "📈", title: "Remontada",
+                detail: "A la una ibas por debajo del 50 % de productividad y acabaste la jornada completa por encima del 80 %. Los partidos duran noventa minutos.") { c in
+        guard let midday = c.samples.middayProductivity else { return false }
+        return midday < 50 && c.worked >= fullDay && c.today.productivity >= 80
+    },
+    Achievement(id: "pomodoro", emoji: "🍅", title: "Pomodoro",
+                detail: "Cuatro bloques seguidos de unos 25 minutos de trabajo con un descanso corto entre ellos. Sin temporizador ni nada.") {
+        $0.columns.pomodoros >= 4
+    },
+    Achievement(id: "numero-uno", emoji: "🥇", title: "Número uno",
+                detail: "Eres el primero del ranking. Desde arriba se ve todo.") { _ in false },
 
     // Meta
     Achievement(id: "hola", emoji: "👋", title: "Hola, mundo",
@@ -357,6 +386,12 @@ let pastDayChecks: [String: (DayData) -> Bool] = [
     "hola": { _ in false },
 ]
 
+/// The general strike of 11 November 2026.
+func isGeneralStrike(_ date: Date, _ calendar: Calendar) -> Bool {
+    let d = calendar.dateComponents([.year, .month, .day], from: date)
+    return d.year == 2026 && d.month == 11 && d.day == 11
+}
+
 func isHalloween(_ date: Date, _ calendar: Calendar) -> Bool {
     let d = calendar.dateComponents([.month, .day], from: date)
     return d.month == 10 && d.day == 31
@@ -432,6 +467,19 @@ final class Achievements: ObservableObject {
         migrate()
     }
 
+    /// The day the ranking starts to count, once everybody has had time to show up in it.
+    static let rankingCounts: Date = {
+        var c = DateComponents(); c.year = 2026; c.month = 11; c.day = 26
+        return Calendar(identifier: .gregorian).date(from: c)!
+    }()
+
+    /// Being first in the community ranking, with at least two more people in it.
+    func rankedFirst(now: Date = Date()) {
+        guard now >= Self.rankingCounts, state.unlocked["numero-uno"] == nil,
+              let a = allAchievements.first(where: { $0.id == "numero-uno" }) else { return }
+        unlock([a])
+    }
+
     /// The exclusive achievements the server says are yours; one taken back goes away.
     func grant(_ ids: [String]) {
         let known = Set(exclusiveAchievements.map(\.id)), granted = Set(ids).intersection(known)
@@ -493,11 +541,13 @@ final class Achievements: ObservableObject {
         state.history[Fmt.ymd(Date())] = DaySummary(worked: today.worked, productivity: today.productivity)
 
         if state.firstDay == nil { state.firstDay = Fmt.ymd(Date()) }
-        let ctx = AchievementContext(
+        var ctx = AchievementContext(
             today: today, previous: previousTodayDay == Fmt.ymd(Date()) ? previousToday : nil, now: Date(), week: week, history: state.history,
             popoverOpensToday: state.opensDay == Fmt.ymd(Date()) ? state.opens : 0,
             pausesToday: state.pausesDay == Fmt.ymd(Date()) ? state.pauses ?? 0 : 0,
             isFirstDay: state.firstDay == Fmt.ymd(Date()))
+        ctx.samples = WorkTimeline.samples(for: today)
+        ctx.columns = WorkTimeline.columns(for: today, to: Double(ctx.minuteOfDay), open: true)
         previousToday = today
         previousTodayDay = Fmt.ymd(Date())
         previousWeek = week
@@ -577,9 +627,13 @@ final class Achievements: ObservableObject {
         }
         // The first day DeskTime or this app ran may only be part of a day.
         let isFirst = day == state.firstDay || !state.history.keys.contains { $0 < day }
-        return AchievementContext(
+        var ctx = AchievementContext(
             today: data, previous: nil, now: calendar.date(bySettingHour: 12, minute: 0, second: 0, of: date) ?? date,
             week: week, history: state.history, popoverOpensToday: 0, isFirstDay: isFirst)
+        // Only the days this Mac watched have a timeline.
+        ctx.samples = WorkTimeline.samples(for: data)
+        ctx.columns = WorkTimeline.columns(for: data, to: nil, open: false)
+        return ctx
     }
 
     private var observer: NSObjectProtocol?

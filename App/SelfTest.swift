@@ -149,6 +149,25 @@ enum SelfTest {
             let late = WorkTimeline.columns([S(t: 600, p: 1800, n: 0, u: 0)], totals: S(t: 600, p: 1800, n: 0, u: 0), from: 540, to: 600, open: true)
             check(late.count == 1 && late[0].loose && abs(late[0].active - 0.5) < 1e-6, "a long gap is one loose column: \(late)")
         }
+        // Reading the day: a nap needs a watched, idle hour with work on both sides; Pomodoro, four blocks in a row.
+        do {
+            typealias C = WorkTimeline.Column
+            func day(_ steps: [(Double, Double)], from: Double) -> [C] {   // (minutes, active share)
+                var t = from
+                return steps.map { m, a in defer { t += m }; return C(from: t, to: t + m, p: a * m * 60, n: 0, u: 0) }
+            }
+            check(day([(60, 1), (65, 0), (30, 1)], from: 840).hadSiesta, "siesta not seen")
+            check(!day([(60, 1), (50, 0), (30, 1)], from: 840).hadSiesta, "a 50 minute break is not a siesta")
+            check(!day([(60, 1), (120, 0)], from: 840).hadSiesta, "leaving is not a siesta")
+            var unwatched = day([(60, 1), (65, 0), (30, 1)], from: 840); unwatched[1].loose = true
+            check(!unwatched.hadSiesta, "an unwatched hour is not a siesta")
+            let block: [(Double, Double)] = [(25, 1), (5, 0)]
+            check(day(block + block + block + [(25, 1)], from: 540).pomodoros == 4, "pomodoro not seen")
+            check(day(block + [(25, 1), (40, 0)] + block + [(25, 1)], from: 540).pomodoros == 2, "a long break restarts the count")
+            check(day([(120, 1)], from: 540).pomodoros == 0, "two hours straight are not pomodoros")
+            let noon: [WorkTimeline.Sample] = [.init(t: 700, p: 3000, n: 0, u: 0), .init(t: 781, p: 2000, n: 3000, u: 0)]
+            check(noon.middayProductivity == 40, "midday productivity: \(String(describing: noon.middayProductivity))")
+        }
         // Community ranking: achievements and cards weigh the same; prestige breaks a tie.
         do {
             func m(_ id: Int, _ a: Int, _ c: Int, _ prestige: Int = 0) -> Member {

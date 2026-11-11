@@ -39,6 +39,7 @@ final class Store: ObservableObject {
     let album: Album
     let profile: Profile
     let community: Community
+    private var lastRanking = Date.distantPast
     var onChange: (() -> Void)?
     private var timer: Timer?
     private var idleTimer: Timer?
@@ -224,6 +225,14 @@ final class Store: ObservableObject {
             Task {
                 await community.sync(shared, photo: profile.photoData)
                 if let grants = community.grants { achievements.grant(grants) }
+                // The ranking is looked at a few times a day, for whoever leads it.
+                if Date().timeIntervalSince(lastRanking) > 3 * 3600 {
+                    lastRanking = Date()
+                    await community.refresh()
+                    if community.members.count >= 3, CommunityView.ranked(community.members).first?.id == community.me {
+                        achievements.rankedFirst()
+                    }
+                }
             }
             if !album.state.backfilled && !backfilling && !isSnapshotRender {
                 backfilling = true
