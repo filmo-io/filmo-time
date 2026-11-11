@@ -78,7 +78,29 @@ enum AppKeys {
                               "lasso.io", "farmerswife.com", "odoo.com"]
 }
 
-let allAchievements: [Achievement] = [
+/// Achievements for certain people only. Who has them is decided by the community server,
+/// not here; for everybody else they do not exist, so they never count against anyone.
+let exclusiveAchievements: [Achievement] = [
+    Achievement(id: "el-creador", emoji: "⚡️", title: "El creador",
+                detail: "Hágase la app. Y la app se hizo.") { _ in true },
+    Achievement(id: "founder", emoji: "👑", title: "Founder",
+                detail: "Fundaste Filmo. Sin ti no habría horas que contar.") { _ in true },
+]
+
+/// The exclusive ones this person has been granted.
+nonisolated(unsafe) var grantedExclusives: Set<String> = []
+
+/// Everything this person can earn.
+var allAchievements: [Achievement] {
+    grantedExclusives.isEmpty ? standardAchievements : standardAchievements + exclusiveAchievements.filter { grantedExclusives.contains($0.id) }
+}
+
+/// Any achievement there is, to show somebody else's.
+func anyAchievement(_ id: String) -> Achievement? {
+    standardAchievements.first { $0.id == id } ?? exclusiveAchievements.first { $0.id == id }
+}
+
+let standardAchievements: [Achievement] = [
     // Yours
     Achievement(id: "ai-addict", emoji: "🤖", title: "AI addict",
                 detail: "Más del 80 % de una jornada completa en Claude (o similar). ¿Quién trabaja para quién?") {
@@ -386,6 +408,8 @@ final class Achievements: ObservableObject {
         var tiers: [String: Int]?
         /// Achievements being earned again for the next tier, with the day that started.
         var chasing: [String: String]?
+        /// Exclusive achievements the community server granted.
+        var granted: [String]?
     }
 
     @Published private(set) var state = State()
@@ -404,7 +428,19 @@ final class Achievements: ObservableObject {
            let s = try? JSONDecoder().decode(State.self, from: data) {
             state = s
         }
+        grantedExclusives = Set(state.granted ?? [])
         migrate()
+    }
+
+    /// The exclusive achievements the server says are yours; one taken back goes away.
+    func grant(_ ids: [String]) {
+        let known = Set(exclusiveAchievements.map(\.id)), granted = Set(ids).intersection(known)
+        guard granted != Set(state.granted ?? []) else { return }
+        for id in known.subtracting(granted) { state.unlocked[id] = nil; state.seen.remove(id) }
+        state.granted = granted.sorted()
+        grantedExclusives = granted
+        unlock(exclusiveAchievements.filter { granted.contains($0.id) && state.unlocked[$0.id] == nil })
+        save()
     }
 
     /// One-off fixes to saved progress, applied once per install.

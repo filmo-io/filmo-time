@@ -221,7 +221,10 @@ final class Store: ObservableObject {
             album.reward(tiers: achievements.tierMap)
             // Everybody shows up in the community, whether or not they open their profile.
             let shared = SharedProfile.make(profile: profile, achievements: achievements, album: album)
-            Task { await community.sync(shared, photo: profile.photoData) }
+            Task {
+                await community.sync(shared, photo: profile.photoData)
+                if let grants = community.grants { achievements.grant(grants) }
+            }
             if !album.state.backfilled && !backfilling && !isSnapshotRender {
                 backfilling = true
                 Task {

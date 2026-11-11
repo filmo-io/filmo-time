@@ -12,6 +12,8 @@ Environment=PORT=3190
 Environment=HOST=127.0.0.1
 Environment=DB_PATH=/var/lib/filmo-time-community/community.sqlite
 Environment=ALLOWED_DOMAIN=filmo.io
+# Who has the exclusive achievements, by DeskTime id: /etc/filmo-time-community/env sets GRANTS={"id":[...]}
+EnvironmentFile=-/etc/filmo-time-community/env
 ExecStart=/usr/bin/node /opt/filmo-time-community/community.mjs
 Restart=always
 RestartSec=5

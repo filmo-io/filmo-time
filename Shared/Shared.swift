@@ -175,6 +175,8 @@ struct WeekDay: Identifiable, Codable {
     var desktime: Double = 0
     var productivity: Double = 0
     var efficiency: Double = 0
+    /// Time at work, breaks included. Missing in days saved before it was kept.
+    var atWork: Double?
     var isFuture = false
     var label: String { Fmt.weekdayShort(date) }
 }
@@ -354,7 +356,7 @@ extension DeskTimeAPI {
                     if d > now { return WeekDay(date: d, isFuture: true) }
                     if let t = today, Calendar.current.isDateInToday(d) {
                         return WeekDay(date: d, productive: t.productive, desktime: t.desktime,
-                                       productivity: t.productivity, efficiency: t.efficiency)
+                                       productivity: t.productivity, efficiency: t.efficiency, atWork: t.atWork)
                     }
                     if let k = known[Fmt.ymd(d)] { return k }
                     let j = try await get("employee/basic", date: d)
@@ -362,7 +364,8 @@ extension DeskTimeAPI {
                                    productive: num(j["productiveTime"]),
                                    desktime: num(j["desktimeTime"]),
                                    productivity: num(j["productivity"]),
-                                   efficiency: num(j["efficiency"]))
+                                   efficiency: num(j["efficiency"]),
+                                   atWork: num(j["atWorkTime"]))
                 }
             }
             var out: [WeekDay] = []

@@ -14,6 +14,10 @@ const HOST = process.env.HOST ?? '127.0.0.1'
 const DB_PATH = process.env.DB_PATH ?? './community.sqlite'
 const ALLOWED_DOMAIN = (process.env.ALLOWED_DOMAIN ?? 'filmo.io').toLowerCase()
 const DESKTIME = process.env.DESKTIME_URL ?? 'https://desktime.com/api/v2/json/employee/basic'
+// Exclusive achievements and the DeskTime ids that have them, e.g. {"founder":[123,456]}.
+// Kept here, on the server, so no list of people lives in the app or its public repository.
+const GRANTS = JSON.parse(process.env.GRANTS ?? '{}')
+const grantsOf = (id) => Object.keys(GRANTS).filter((k) => Array.isArray(GRANTS[k]) && GRANTS[k].includes(id))
 const MAX_JSON = 16 * 1024
 const MAX_PHOTO = 200 * 1024
 const SLOTS = 3
@@ -138,6 +142,7 @@ async function route(req, res) {
   if (req.method === 'POST' && path === '/v1/register') return send(200, await register(req))
 
   const me = member(req)
+  if (req.method === 'GET' && path === '/v1/me') return send(200, { id: me.id, name: me.name, grants: grantsOf(me.id) })
   if (req.method === 'GET' && path === '/v1/profiles') return send(200, { me: me.id, profiles: listing() })
   if (req.method === 'PUT' && path === '/v1/profile') {
     let json

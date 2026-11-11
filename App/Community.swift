@@ -78,6 +78,8 @@ final class Community: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var error: String?
     @Published private(set) var photos: [Int: NSImage] = [:]
+    /// Exclusive achievements the server grants you; nil until it has answered.
+    @Published private(set) var grants: [String]?
 
     private struct Saved: Codable {
         var token: String
@@ -147,6 +149,10 @@ final class Community: ObservableObject {
         busy = true
         defer { busy = false }
         do {
+            if grants == nil {
+                struct Me: Decodable { let grants: [String] }
+                grants = try JSONDecoder().decode(Me.self, from: try await authed("GET", "v1/me")).grants
+            }
             if saved?.pushed != profile {
                 _ = try await authed("PUT", "v1/profile", body: try JSONEncoder().encode(profile), type: "application/json")
                 saved?.pushed = profile
@@ -368,9 +374,11 @@ struct MemberPage: View {
                     HStack(alignment: .top, spacing: 0) {
                         ForEach(0..<Profile.slots, id: \.self) { i in
                             let shown = i < p.achievements.count ? p.achievements[i] : nil
-                            let a = shown.flatMap { s in allAchievements.first { $0.id == s.id } }
-                            // A hidden achievement stays a secret for whoever has not earned it.
-                            let secret = a.map { achievements.state.unlocked[$0.id] == nil && progressTrackers[$0.id] == nil } ?? false
+                            let a = shown.flatMap { anyAchievement($0.id) }
+                            // A hidden achievement stays a secret for whoever has not earned it; an exclusive one is there to be seen.
+                            let secret = a.map { a in
+                                achievements.state.unlocked[a.id] == nil && progressTrackers[a.id] == nil && !exclusiveAchievements.contains { $0.id == a.id }
+                            } ?? false
                             AchievementBadge(achievement: a, tier: shown?.tier.flatMap(PrestigeTier.init(rawValue:)), secret: secret, plus: false)
                                 .help(secret ? "Aún no lo has descubierto" : a?.detail ?? "")
                         }

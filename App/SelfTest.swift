@@ -149,6 +149,22 @@ enum SelfTest {
             let late = WorkTimeline.columns([S(t: 600, p: 1800, n: 0, u: 0)], totals: S(t: 600, p: 1800, n: 0, u: 0), from: 540, to: 600, open: true)
             check(late.count == 1 && late[0].loose && abs(late[0].active - 0.5) < 1e-6, "a long gap is one loose column: \(late)")
         }
+        // Update dialog: every pending version, newest first, and a line for one without notes.
+        do {
+            let u = URL(string: "https://example.com")!
+            let log = Updater.changelog([.init(version: "1.2.3", notes: "- Uno.\n", dmg: u, page: u), .init(version: "1.2.2", notes: "", dmg: u, page: u)])
+            check(log == "Versión 1.2.3\n- Uno.\n\nVersión 1.2.2\nMejoras y correcciones.", "changelog: \(log)")
+            check(Updater.isNewer("1.2.10", than: "1.2.9") && !Updater.isNewer("1.2", than: "1.2.0"), "version order")
+        }
+        // Exclusive achievements exist only for whoever was granted them.
+        do {
+            let before = grantedExclusives
+            grantedExclusives = []
+            check(!allAchievements.contains { $0.id == "founder" } && anyAchievement("founder") != nil, "exclusive leaked to everybody")
+            grantedExclusives = ["founder"]
+            check(allAchievements.count == standardAchievements.count + 1, "granted exclusive not counted")
+            grantedExclusives = before
+        }
         print(failures == 0 ? "SELFTEST OK" : "SELFTEST FAILED: \(failures)")
         return failures == 0 ? 0 : 1
     }

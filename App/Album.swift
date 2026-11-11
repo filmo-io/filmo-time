@@ -195,7 +195,7 @@ final class Album: ObservableObject {
 
     /// Achievements and prestige tiers, as an extra on every coin: with everything, double.
     @Published private(set) var achievementBonus: Double = 0
-    /// Time worked today so far, to say how long until today's free pack.
+    /// Time at work today so far, to say how long until today's free pack.
     @Published private(set) var todaySeconds: Double = 0
 
     /// Whether today's free pack has already been earned.
@@ -238,7 +238,8 @@ final class Album: ObservableObject {
         let bonus = Self.bonus(tiers: tiers)
         if bonus != achievementBonus { achievementBonus = bonus }
         var changed = false
-        func count(_ key: String, seconds: Double, productivity: Double, isToday: Bool) {
+        // Coins come from the time worked; the pack of the day, from the whole workday, breaks included.
+        func count(_ key: String, seconds: Double, workday: Double, productivity: Double, isToday: Bool) {
             let value = coins(seconds: seconds, productivity: productivity)
             // Past days keep the value they were first counted with.
             // Past days keep their first value; today only ever goes up, so coins already spent stay covered.
@@ -247,7 +248,7 @@ final class Album: ObservableObject {
             } else {
                 state.earned[key] = value; changed = true
             }
-            if seconds >= Self.fullDay, key >= state.since, !state.paidDays.contains(key) {
+            if max(seconds, workday) >= Self.fullDay, key >= state.since, !state.paidDays.contains(key) {
                 state.paidDays.append(key)
                 // Every full workday: the pack of the day. Every five: an Estreno.
                 state.packs[dailyPack.id, default: 0] += 1
@@ -256,12 +257,13 @@ final class Album: ObservableObject {
             }
         }
         for d in week where !d.isFuture && d.desktime > 0 {
-            count(Fmt.ymd(d.date), seconds: d.desktime, productivity: d.productivity,
+            count(Fmt.ymd(d.date), seconds: d.desktime, workday: d.atWork ?? d.desktime, productivity: d.productivity,
                   isToday: Calendar.current.isDate(d.date, inSameDayAs: now))
         }
         if let today, today.arrivedDay == Fmt.ymd(now) {
-            count(Fmt.ymd(now), seconds: today.desktime, productivity: today.productivity, isToday: true)
-            if today.desktime != todaySeconds { todaySeconds = today.desktime }
+            let workday = max(today.desktime, today.atWork)
+            count(Fmt.ymd(now), seconds: today.desktime, workday: workday, productivity: today.productivity, isToday: true)
+            if workday != todaySeconds { todaySeconds = workday }
         }
         if changed { save() }
     }

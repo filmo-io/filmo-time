@@ -13,7 +13,11 @@ final class Updater {
     private var busy = false
 
     var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        // `--como-version 1.2.0` pretends to be an older build, to try the update dialog.
+        if let i = CommandLine.arguments.firstIndex(of: "--como-version"), i + 1 < CommandLine.arguments.count {
+            return CommandLine.arguments[i + 1]
+        }
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
     func start() {
@@ -33,20 +37,36 @@ final class Updater {
         let page: URL
     }
 
-    func latestRelease() async throws -> Release? {
-        var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.repo)/releases/latest")!)
+    /// Every published release newer than this build, newest first.
+    func pendingReleases() async throws -> [Release] {
+        var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.repo)/releases?per_page=30")!)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.timeoutInterval = 20
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard (resp as? HTTPURLResponse)?.statusCode == 200,
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let tag = obj["tag_name"] as? String,
-              let assets = obj["assets"] as? [[String: Any]],
-              let asset = assets.first(where: { $0["name"] as? String == Self.assetName }),
-              let dmg = (asset["browser_download_url"] as? String).flatMap(URL.init(string:)),
-              let page = (obj["html_url"] as? String).flatMap(URL.init(string:)) else { return nil }
-        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-        return Release(version: version, notes: obj["body"] as? String ?? "", dmg: dmg, page: page)
+              let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return [] }
+        let current = currentVersion
+        return list.compactMap { obj -> Release? in
+            guard obj["draft"] as? Bool != true, obj["prerelease"] as? Bool != true,
+                  let tag = obj["tag_name"] as? String,
+                  let assets = obj["assets"] as? [[String: Any]],
+                  let asset = assets.first(where: { $0["name"] as? String == Self.assetName }),
+                  let dmg = (asset["browser_download_url"] as? String).flatMap(URL.init(string:)),
+                  let page = (obj["html_url"] as? String).flatMap(URL.init(string:)) else { return nil }
+            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            return Release(version: version, notes: obj["body"] as? String ?? "", dmg: dmg, page: page)
+        }
+        .filter { Self.isNewer($0.version, than: current) }
+        .sorted { Self.isNewer($0.version, than: $1.version) }
+    }
+
+    /// What changed in each pending version, newest first.
+    static func changelog(_ releases: [Release]) -> String {
+        releases.map { r in
+            let notes = r.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Versión \(r.version)\n" + (notes.isEmpty ? "Mejoras y correcciones." : notes)
+        }
+        .joined(separator: "\n\n")
     }
 
     static func isNewer(_ a: String, than b: String) -> Bool {
@@ -61,21 +81,27 @@ final class Updater {
 
     func check(userInitiated: Bool) async {
         guard !busy else { return }
-        let release: Release?
-        do { release = try await latestRelease() } catch {
+        let pending: [Release]
+        do { pending = try await pendingReleases() } catch {
             if userInitiated { alert("No se pudo comprobar si hay actualizaciones", error.localizedDescription) }
             return
         }
-        guard let release, Self.isNewer(release.version, than: currentVersion) else {
+        guard let release = pending.first else {
             if userInitiated { alert("Filmo Time está al día", "Tienes la última versión (\(currentVersion)).") }
             return
         }
         NSApp.activate(ignoringOtherApps: true)
         let a = NSAlert()
         a.messageText = "Hay una versión nueva de Filmo Time"
-        let notes = release.notes.trimmingCharacters(in: .whitespacesAndNewlines)
-        a.informativeText = "Versión \(release.version) (tienes la \(currentVersion))."
-            + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
+        if pending.count >= 2 {
+            // Several versions behind: everything that changed since yours, in a list that scrolls.
+            a.informativeText = "Versión \(release.version) (tienes la \(currentVersion)). Esto es lo que ha cambiado desde la tuya:"
+            a.accessoryView = Self.scrolling(Self.changelog(pending))
+        } else {
+            let notes = release.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            a.informativeText = "Versión \(release.version) (tienes la \(currentVersion))."
+                + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
+        }
         a.addButton(withTitle: "Actualizar ahora")
         a.addButton(withTitle: "Más tarde")
         guard a.runModal() == .alertFirstButtonReturn else { return }
@@ -175,6 +201,20 @@ final class Updater {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    }
+
+    private static func scrolling(_ text: String) -> NSView {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 340, height: 190))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let view = NSTextView(frame: NSRect(origin: .zero, size: scroll.contentSize))
+        view.isEditable = false
+        view.font = .systemFont(ofSize: 12)
+        view.textContainerInset = NSSize(width: 6, height: 6)
+        view.autoresizingMask = [.width]
+        view.string = text
+        scroll.documentView = view
+        return scroll
     }
 
     private func alert(_ title: String, _ text: String) {
