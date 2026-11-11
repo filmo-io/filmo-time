@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 APP_NAME="${APP_NAME:-Filmo Time}"   # shown in Finder, the menu bar and the widget gallery
-VERSION="${VERSION:-1.2.4}"   # override per release: VERSION=1.2.5 ./build.sh --dmg
+VERSION="${VERSION:-1.2.5}"   # override per release: VERSION=1.2.6 ./build.sh --dmg
 BUNDLE_ID="io.filmo.time"
 APP="$APP_NAME.app"
 EXT="$APP/Contents/PlugIns/DeskTimeWidgetExtension.appex"
