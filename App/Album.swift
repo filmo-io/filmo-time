@@ -1675,6 +1675,7 @@ struct AlbumTab: View {
     @ObservedObject var model: Album
     @ObservedObject var achievements: Achievements
     @State private var section = Section(rawValue: AlbumTab.snapshotSection) ?? .packs
+    @AppStorage("dexOnlyOwned") private var onlyOwned = false
     @State private var detail: CardDef?
     @Namespace private var underline
     /// Snapshot only.
@@ -1877,42 +1878,22 @@ struct AlbumTab: View {
 
     /// Every card, by category and then by rarity, best first.
     private var album: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(cardSets) { s in
-                let have = s.cards.filter { model.owned($0) != nil }.count
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 5) {
-                        Image(systemName: s.symbol).font(.system(size: 10)).foregroundStyle(.secondary)
-                        Text(s.name).font(.system(size: 12, weight: .semibold))
-                        Spacer()
-                        if have == s.cards.count {
-                            Label("Completa", systemImage: "checkmark.seal.fill").font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(Theme.green)
-                        } else {
-                            Text("\(have)/\(s.cards.count)").font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
-                        }
-                    }
-                    ForEach(Rarity.allCases.reversed(), id: \.self) { r in
-                        let cards = s.cards.filter { $0.rarity == r }
-                        if !cards.isEmpty {
-                            HStack(spacing: 5) {
-                                Capsule().fill(r.gradient).frame(width: 14, height: 4)
-                                Text(r.name).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                                Text("\(cards.filter { model.owned($0) != nil }.count)/\(cards.count)")
-                                    .font(.system(size: 9).monospacedDigit()).foregroundStyle(.tertiary)
-                            }
-                            .padding(.top, 2)
-                            LazyVGrid(columns: Array(repeating: GridItem(.fixed(54), spacing: 9), count: 5),
-                                      alignment: .leading, spacing: 10) {
-                                ForEach(cards) { c in
-                                    Button { withAnimation(.smooth(duration: 0.2)) { detail = c } } label: { slot(c) }
-                                        .buttonStyle(.plain)
-                                        .accessibilityLabel(model.owned(c) != nil ? c.title : "Cromo oculto, \(c.rarity.name.lowercased())")
-                                }
-                            }
-                        }
-                    }
+        VStack(alignment: .trailing, spacing: 2) {
+            Button { withAnimation(.smooth(duration: 0.2)) { onlyOwned.toggle() } } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: onlyOwned ? "checkmark.circle.fill" : "circle").font(.system(size: 9))
+                    Text("Solo los que tengo").font(.system(size: 10))
                 }
+                .foregroundStyle(onlyOwned ? Color.primary : Color.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Oculta los huecos de los cromos que aún no tienes")
+            CardCatalog(scope: "dex", only: onlyOwned && !isSnapshotRender ? { model.owned($0) != nil } : nil,
+                        owned: { model.owned($0) != nil }) { c in
+                Button { withAnimation(.smooth(duration: 0.2)) { detail = c } } label: { slot(c) }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(model.owned(c) != nil ? c.title : "Cromo oculto, \(c.rarity.name.lowercased())")
             }
         }
     }
@@ -1945,6 +1926,94 @@ struct AlbumTab: View {
 
     // MARK: Help
 
+}
+
+/// Which parts of a catalogue are folded away; remembered between openings.
+@MainActor
+final class CatalogFolds: ObservableObject {
+    static let shared = CatalogFolds()
+    private static let key = "catalogFolds"
+    @Published private(set) var folded = Set(UserDefaults.standard.stringArray(forKey: CatalogFolds.key) ?? [])
+
+    func toggle(_ id: String) {
+        if folded.remove(id) == nil { folded.insert(id) }
+        UserDefaults.standard.set(folded.sorted(), forKey: Self.key)
+    }
+}
+
+/// Cards by category and then by rarity, best first; categories and rarities fold away.
+struct CardCatalog<Slot: View>: View {
+    /// Keeps the folds of each place it is used apart.
+    let scope: String
+    /// Lists only these; the album lists every card, gaps included.
+    var only: ((CardDef) -> Bool)? = nil
+    let owned: (CardDef) -> Bool
+    var width: CGFloat = 54
+    @ViewBuilder let slot: (CardDef) -> Slot
+    @ObservedObject private var folds = CatalogFolds.shared
+
+    private func isFolded(_ id: String) -> Bool { !isSnapshotRender && folds.folded.contains("\(scope)/\(id)") }
+
+    private func header<Label: View>(_ id: String, @ViewBuilder label: () -> Label) -> some View {
+        Button { withAnimation(.smooth(duration: 0.2)) { folds.toggle("\(scope)/\(id)") } } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.right").font(.system(size: 7, weight: .bold)).foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isFolded(id) ? 0 : 90))
+                label()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isFolded(id) ? "Mostrar" : "Ocultar")
+    }
+
+    private func tally(_ cards: [CardDef]) -> String {
+        only == nil ? "\(cards.filter(owned).count)/\(cards.count)" : "\(cards.count)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(cardSets) { s in
+                let listed = s.cards.filter { only?($0) ?? true }
+                if !listed.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        header(s.id) {
+                            Image(systemName: s.symbol).font(.system(size: 10)).foregroundStyle(.secondary)
+                            Text(s.name).font(.system(size: 12, weight: .semibold))
+                            Spacer()
+                            if only == nil, listed.allSatisfy(owned) {
+                                Label("Completa", systemImage: "checkmark.seal.fill").font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(Theme.green)
+                            } else {
+                                Text(tally(listed)).font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                        }
+                        if !isFolded(s.id) {
+                            ForEach(Rarity.allCases.reversed(), id: \.self) { r in
+                                let cards = listed.filter { $0.rarity == r }
+                                if !cards.isEmpty {
+                                    let id = "\(s.id)/\(r.rawValue)"
+                                    header(id) {
+                                        Capsule().fill(r.gradient).frame(width: 14, height: 4)
+                                        Text(r.name).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                                        Text(tally(cards)).font(.system(size: 9).monospacedDigit()).foregroundStyle(.tertiary)
+                                        Spacer()
+                                    }
+                                    .padding(.top, 2)
+                                    if !isFolded(id) {
+                                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(width), spacing: 9), count: 5),
+                                                  alignment: .leading, spacing: 10) {
+                                            ForEach(cards) { c in slot(c) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A gap in the album: the rarity frame and the title, greyed out.

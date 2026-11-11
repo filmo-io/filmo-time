@@ -133,6 +133,22 @@ enum SelfTest {
             print("alfombra: \(legends) legendaries in \(total) packs; worst gap \(worst) packs (pyramid included)")
         }
 
+        // Workday timeline: in order, never overlapping, and each kind adds up to its total.
+        do {
+            typealias S = WorkTimeline.Sample
+            let samples = [S(t: 545, p: 300, n: 0, u: 0), S(t: 550, p: 300, n: 0, u: 0), S(t: 555, p: 420, n: 60, u: 120)]
+            let totals = S(t: 560, p: 420, n: 60, u: 120)
+            let cols = WorkTimeline.columns(samples, totals: totals, from: 540, to: 560, open: false)
+            check(cols.count == 4 && zip(cols, cols.dropFirst()).allSatisfy { $0.to == $1.from }, "timeline columns: \(cols)")
+            check(cols.first?.from == 540 && cols.last?.to == 560, "timeline does not span the day")
+            check(abs(cols.reduce(0) { $0 + $1.p } - 420) < 1 && abs(cols.reduce(0) { $0 + $1.n } - 60) < 1
+                  && abs(cols.reduce(0) { $0 + $1.u } - 120) < 1, "timeline totals: \(cols)")
+            check(cols.map(\.active) == [1, 0, 1, 0], "timeline activity: \(cols.map(\.active))")
+            let live = WorkTimeline.columns(samples, totals: totals, from: 540, to: 560, open: true)
+            check(live.last?.to == 555, "an open day must not judge its last minutes")
+            let late = WorkTimeline.columns([S(t: 600, p: 1800, n: 0, u: 0)], totals: S(t: 600, p: 1800, n: 0, u: 0), from: 540, to: 600, open: true)
+            check(late.count == 1 && late[0].loose && abs(late[0].active - 0.5) < 1e-6, "a long gap is one loose column: \(late)")
+        }
         print(failures == 0 ? "SELFTEST OK" : "SELFTEST FAILED: \(failures)")
         return failures == 0 ? 0 : 1
     }

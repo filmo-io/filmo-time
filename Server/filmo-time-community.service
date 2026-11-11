@@ -1,0 +1,25 @@
+[Unit]
+Description=Filmo Time community profiles
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=filmo-time
+Group=filmo-time
+WorkingDirectory=/opt/filmo-time-community
+Environment=PORT=3190
+Environment=HOST=127.0.0.1
+Environment=DB_PATH=/var/lib/filmo-time-community/community.sqlite
+Environment=ALLOWED_DOMAIN=filmo.io
+ExecStart=/usr/bin/node /opt/filmo-time-community/community.mjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/filmo-time-community
+
+[Install]
+WantedBy=multi-user.target

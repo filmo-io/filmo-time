@@ -38,7 +38,7 @@ cp build/filmo-simbolo.png "$APP/Contents/Resources/"
 mkdir -p "$APP/Contents/Resources/logos" && cp Resources/logos/*.png "$APP/Contents/Resources/logos/"
 cp build/filmo-simbolo.png "$EXT/Contents/Resources/"
 
-swiftc "${FLAGS[@]}" -o "$APP/Contents/MacOS/DeskTimeWidget" App/App.swift App/Updater.swift App/Achievements.swift App/Prestige.swift App/Brand.swift App/Cards.swift App/CardsMore.swift App/CardsFilmo.swift App/CardsAlt.swift App/SceneOriginals.swift App/Variants.swift App/Album.swift App/SelfTest.swift Shared/Shared.swift
+swiftc "${FLAGS[@]}" -o "$APP/Contents/MacOS/DeskTimeWidget" App/App.swift App/Updater.swift App/Achievements.swift App/Prestige.swift App/Brand.swift App/Cards.swift App/CardsMore.swift App/CardsFilmo.swift App/CardsAlt.swift App/SceneOriginals.swift App/Variants.swift App/Album.swift App/Profile.swift App/Community.swift App/Timeline.swift App/SelfTest.swift Shared/Shared.swift
 # Widget extensions start in NSExtensionMain, not in their own main (Xcode does the same).
 swiftc "${FLAGS[@]}" -application-extension -Xlinker -e -Xlinker _NSExtensionMain \
   -o "$EXT/Contents/MacOS/DeskTimeWidgetExtension" Widget/Widget.swift Shared/Shared.swift

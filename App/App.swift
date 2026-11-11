@@ -7,7 +7,7 @@ import WidgetKit
 
 // MARK: - Store
 
-enum Tab: Hashable { case summary, apps, achievements, album }
+enum Tab: Hashable { case summary, apps, achievements, album, profile }
 
 /// What the summary shows: one day, its week, or any range of days.
 enum Period: Equatable { case day, week, range(Date, Date) }
@@ -37,6 +37,8 @@ final class Store: ObservableObject {
     let demo: Bool
     let achievements: Achievements
     let album: Album
+    let profile: Profile
+    let community: Community
     var onChange: (() -> Void)?
     private var timer: Timer?
     private var idleTimer: Timer?
@@ -54,6 +56,8 @@ final class Store: ObservableObject {
         self.demo = demo
         achievements = Achievements(persist: !demo && !isSnapshotRender)
         album = Album(persist: !demo && !isSnapshotRender)
+        profile = Profile(persist: !demo && !isSnapshotRender)
+        community = Community(enabled: !demo && !isSnapshotRender)
         if demo { hasKey = true }
     }
 
@@ -211,9 +215,13 @@ final class Store: ObservableObject {
             let todayWeek = try await api.week(around: Date(), today: t, known: knownDays)
             remember(todayWeek)
             today = t
+            WorkTimeline.record(t)
             achievements.evaluate(today: t, week: todayWeek)
             album.record(today: t, week: todayWeek, tiers: achievements.activeTierMap)
             album.reward(tiers: achievements.tierMap)
+            // Everybody shows up in the community, whether or not they open their profile.
+            let shared = SharedProfile.make(profile: profile, achievements: achievements, album: album)
+            Task { await community.sync(shared, photo: profile.photoData) }
             if !album.state.backfilled && !backfilling && !isSnapshotRender {
                 backfilling = true
                 Task {
@@ -380,10 +388,15 @@ struct WidgetView: View {
                 }
                 HStack(spacing: 2) {
                     IconButton(symbol: "chevron.left", help: "Anterior", size: 16) { store.shift(-1) }
-                    Text(store.periodTitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .contentTransition(.opacity)
+                    // In the summary the date is also the way to choose another day, week or range.
+                    if store.tab == .summary {
+                        PeriodMenu(store: store, title: store.periodTitle)
+                    } else {
+                        Text(store.periodTitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .contentTransition(.opacity)
+                    }
                     IconButton(symbol: "chevron.right", help: "Siguiente", size: 16) { store.shift(1) }
                         .opacity(store.canGoForward ? 1 : 0.25)
                         .disabled(!store.canGoForward)
@@ -426,9 +439,13 @@ struct WidgetView: View {
         }
     }
 
+    /// The sections share the whole width, evenly apart.
     private var tabBar: some View {
-        HStack(spacing: 12) {
-            ForEach([(Tab.summary, "Resumen"), (.apps, "Apps"), (.achievements, "Logros"), (.album, "Cromos")], id: \.0) { tab, title in
+        HStack(spacing: 0) {
+            let tabs: [(Tab, String)] = [(.summary, "Resumen"), (.apps, "Apps"), (.achievements, "Logros"), (.album, "Cromos"), (.profile, "Perfil")]
+            ForEach(Array(tabs.enumerated()), id: \.offset) { i, item in
+                let (tab, title) = item
+                if i > 0 { Spacer(minLength: 4) }
                 Button {
                     withAnimation(.smooth(duration: 0.25)) { store.tab = tab }
                 } label: {
@@ -455,8 +472,6 @@ struct WidgetView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Spacer()
-            if store.tab == .summary { PeriodMenu(store: store).padding(.bottom, 8).layoutPriority(1) }
         }
     }
 
@@ -475,6 +490,9 @@ struct WidgetView: View {
             case .apps: AppsTab(day: d).transition(.opacity)
             case .achievements: AchievementsTab(model: store.achievements).transition(.opacity)
             case .album: AlbumTab(model: store.album, achievements: store.achievements).transition(.opacity)
+            case .profile:
+                ProfileTab(profile: store.profile, achievements: store.achievements, album: store.album, community: store.community,
+                           name: store.today?.name ?? d.name).transition(.opacity)
             }
         } else {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -628,9 +646,7 @@ struct SummaryTab: View {
                     .help("Tiempo en el trabajo que DeskTime no contó: pausas, descansos y ratos sin actividad")
             }
 
-            if let s = minutes(day.workStarts), let e = minutes(day.workEnds), e > s {
-                WorkdayBar(day: day, start: s, end: e, isToday: store.isToday)
-            }
+            WorkdayBar(day: day, isToday: store.isToday, demo: store.demo)
 
             Spacer(minLength: 0)
 
@@ -647,11 +663,13 @@ struct SummaryTab: View {
     }
 }
 
+/// The workday runs from the arrival until nine hours later, whatever happened in between.
 struct WorkdayBar: View {
     let day: DayData
-    let start: Double
-    let end: Double
     let isToday: Bool
+    var demo = false
+    static let length: Double = 9 * 60
+    @State private var hovered: WorkTimeline.Column?
 
     var body: some View {
         let nowMin: Double = {
@@ -659,37 +677,104 @@ struct WorkdayBar: View {
             return Double(c.hour! * 60 + c.minute!)
         }()
         let from = minutes(day.arrived)
-        let to: Double? = isToday && day.isOnline ? nowMin : minutes(day.left) ?? (isToday ? nowMin : nil)
-        let lo = min(start, from ?? start), hi = max(end, to ?? end)
-        let span = hi - lo
+        let end = from.map { $0 + Self.length }
+        let open = isToday && day.isOnline
+        // A day that runs past midnight keeps counting forward.
+        let to: Double? = from.flatMap { f in
+            let t = open ? nowMin : minutes(day.left) ?? (isToday ? nowMin : nil)
+            return t.map { $0 < f ? $0 + 1440 : $0 }
+        }
+        let span = max(Self.length, (to ?? 0) - (from ?? 0))
+        let clock = { (m: Double) in String(format: "%02d:%02d", Int(m) / 60 % 24, Int(m) % 60) }
+        let columns: [WorkTimeline.Column] = {
+            guard let from, let to, to > from else { return [] }
+            let samples = demo ? WorkTimeline.demo(from: from, to: to) : WorkTimeline.samples(for: day)
+            let totals = demo ? samples.last ?? .init(t: to, p: 0, n: 0, u: 0)
+                              : WorkTimeline.Sample(t: to, p: day.productive, n: day.neutralTime, u: day.unproductiveTime)
+            return WorkTimeline.columns(samples, totals: totals, from: from, to: to, open: open)
+        }()
+        let kinds = Array(WorkTimeline.Kind.allCases.prefix(3))
 
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Label2(text: "Jornada")
                 Spacer()
-                Text("\(day.workStarts!) – \(day.workEnds!)").font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
+                if let from, let end {
+                    let status: String = {
+                        if isToday, let to, to < end { return " · quedan \(Fmt.duration((end - to) * 60))" }
+                        if let l = day.left, !open { return " · saliste a las \(l)" }
+                        if let to, to >= end { return " · completa" }
+                        return ""
+                    }()
+                    Text("\(clock(from)) – \(clock(end))\(status)").font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
+                }
             }
             GeometryReader { g in
-                let x = { (m: Double) in CGFloat((m - lo) / span) * g.size.width }
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.08))
-                    if let f = from, let t = to, t > f {
-                        Capsule().fill(Theme.brand).frame(width: max(x(t) - x(f), 4)).offset(x: x(f))
+                let lo = from ?? 0
+                Canvas { ctx, size in
+                    let base = size.height - 3
+                    // The nine hours, with the part already gone a little darker.
+                    ctx.fill(Path(roundedRect: CGRect(x: 0, y: base + 1, width: size.width, height: 2), cornerRadius: 1),
+                             with: .color(Color.primary.opacity(0.08)))
+                    if let to {
+                        ctx.fill(Path(roundedRect: CGRect(x: 0, y: base + 1, width: CGFloat((to - lo) / span) * size.width, height: 2), cornerRadius: 1),
+                                 with: .color(Color.primary.opacity(0.22)))
+                    }
+                    for c in columns {
+                        let x = CGFloat((c.from - lo) / span) * size.width
+                        let w = max(CGFloat((c.to - c.from) / span) * size.width - (c.loose ? 0 : 0.6), 0.6)
+                        let total = c.seconds.reduce(0, +)
+                        guard total > 0 else { continue }
+                        // No detail for this stretch: a row of faint ticks instead of made-up columns.
+                        if c.loose {
+                            var tick = x
+                            while tick < x + w - 1 {
+                                ctx.fill(Path(CGRect(x: tick, y: base - 5, width: 1, height: 5)), with: .color(Color.primary.opacity(0.22)))
+                                tick += 3
+                            }
+                            continue
+                        }
+                        var y = base
+                        for (kind, seconds) in zip(kinds, c.seconds) where seconds > 0 {
+                            let h = max(CGFloat(c.active * seconds / total) * base, 0.5)
+                            y -= h
+                            ctx.fill(Path(CGRect(x: x, y: y, width: w, height: h)), with: .color(kind.color.opacity(c.loose ? 0.4 : 1)))
+                        }
                     }
                 }
-                .clipShape(Capsule())
-            }
-            .frame(height: 5)
-            HStack {
-                Text(from != nil ? "Llegaste a las \(day.arrived!)" : "Sin actividad")
-                Spacer()
-                if isToday, nowMin < end {
-                    Text("Quedan \(Fmt.duration((end - nowMin) * 60))")
-                } else if let l = day.left, !(isToday && day.isOnline) {
-                    Text("Saliste a las \(l)")
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    if case .active(let p) = phase {
+                        let m = lo + Double(p.x / g.size.width) * span
+                        hovered = columns.first { m >= $0.from && m < $0.to }
+                    } else {
+                        hovered = nil
+                    }
                 }
             }
-            .font(.system(size: 10))
+            .frame(height: 26)
+            HStack(spacing: 8) {
+                if let h = hovered {
+                    let parts = zip(kinds, h.seconds).filter { $0.1 >= 30 }.map { "\(Fmt.duration($0.1)) \($0.0.name.lowercased())" }
+                    Text("\(clock(h.from)) – \(clock(h.to)) · " + (parts.isEmpty ? "inactivo" : parts.joined(separator: " · "))
+                         + (h.loose ? " · sin detalle: la app no estaba registrando" : ""))
+                        .monospacedDigit()
+                } else if from != nil {
+                    ForEach(kinds, id: \.rawValue) { k in
+                        HStack(spacing: 3) {
+                            Circle().fill(k.color).frame(width: 5, height: 5)
+                            Text(k.name)
+                        }
+                    }
+                    Text("· los huecos son tiempo inactivo").foregroundStyle(.tertiary)
+                } else {
+                    Text("Sin actividad")
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 9.5))
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
             .foregroundStyle(.secondary)
         }
     }
@@ -785,6 +870,8 @@ struct AppRow: View {
 /// The period picker at the top right of the summary.
 struct PeriodMenu: View {
     @ObservedObject var store: Store
+    /// Shown instead of the short name of the period, as plain text with a chevron.
+    var title: String? = nil
     @State private var picking: Picking?
     @State private var day = Date()
     @State private var from = Date()
@@ -828,7 +915,7 @@ struct PeriodMenu: View {
                 } label: { pill }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
-                    .fixedSize()
+                    .fixedSize(horizontal: title == nil, vertical: true)
                     .popover(item: $picking, arrowEdge: .bottom) { p in
                         switch p {
                         case .day: dayPicker
@@ -839,7 +926,22 @@ struct PeriodMenu: View {
         }
     }
 
-    private var pill: some View {
+    @ViewBuilder private var pill: some View {
+        if let title {
+            HStack(spacing: 3) {
+                Text(title).font(.system(size: 11)).contentTransition(.opacity)
+                Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        } else {
+            capsule
+        }
+    }
+
+    private var capsule: some View {
         HStack(spacing: 4) {
             Text(label).font(.system(size: 11, weight: .semibold))
             Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
@@ -1421,6 +1523,18 @@ enum Main {
         if CommandLine.arguments.contains("--menu-periodo") { PeriodMenu.snapshotOpen = true }
         if CommandLine.arguments.contains("--apps") { store.tab = .apps }
         if CommandLine.arguments.contains("--logros") { store.tab = .achievements; store.achievements.loadDemo() }
+        if CommandLine.arguments.contains("--comunidad") {
+            ProfileTab.snapshotCommunity = true
+            store.community.loadDemo()
+            if let i = CommandLine.arguments.firstIndex(of: "--miembro"), i + 1 < CommandLine.arguments.count {
+                CommunityView.snapshotMember = Int(CommandLine.arguments[i + 1]) ?? 0
+            }
+        }
+        if CommandLine.arguments.contains("--perfil") {
+            store.tab = .profile
+            store.album.loadDemo(); store.achievements.loadDemo()
+            Posters.prefetchForSnapshot(arts: true)
+        }
         if CommandLine.arguments.contains("--album") {
             store.tab = .album
             store.album.loadDemo(); store.achievements.loadDemo()
