@@ -149,6 +149,15 @@ enum SelfTest {
             let late = WorkTimeline.columns([S(t: 600, p: 1800, n: 0, u: 0)], totals: S(t: 600, p: 1800, n: 0, u: 0), from: 540, to: 600, open: true)
             check(late.count == 1 && late[0].loose && abs(late[0].active - 0.5) < 1e-6, "a long gap is one loose column: \(late)")
         }
+        // Community ranking: achievements and cards weigh the same; prestige breaks a tie.
+        do {
+            func m(_ id: Int, _ a: Int, _ c: Int, _ prestige: Int = 0) -> Member {
+                Member(id: id, name: "M\(id)", photo: 0, profile: SharedProfile(since: nil, achievementsHave: a, achievementsTotal: 40, cardsHave: c,
+                                                                              cardsTotal: 280, prestige: prestige, cards: [], achievements: []))
+            }
+            let order = CommunityView.ranked([m(1, 4, 28), m(2, 20, 0), m(3, 0, 280), m(4, 4, 28, 3)]).map(\.id)
+            check(order == [3, 2, 4, 1], "ranking: \(order)")
+        }
         // Update dialog: every pending version, newest first, and a line for one without notes.
         do {
             let u = URL(string: "https://example.com")!

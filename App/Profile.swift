@@ -278,7 +278,7 @@ struct ProfileTab: View {
                 }
             }
             Spacer(minLength: 0)
-            CornerButton(symbol: "person.2.fill", help: "Ver la comunidad") {
+            CornerButton(symbol: "trophy.fill", help: "Ver el ranking de la comunidad") {
                 withAnimation(.smooth(duration: 0.2)) { inCommunity = true }
             }
             .frame(maxHeight: .infinity, alignment: .top)

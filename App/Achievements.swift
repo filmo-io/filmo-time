@@ -759,11 +759,13 @@ struct AchievementsTab: View {
                 return x.1 > y.1
             }
         let hiddenCount = allAchievements.count - unlocked.count - inProgress.count
+        // One you prestiged is still yours in the count, while you earn it again.
+        let earnedCount = allAchievements.filter { model.state.unlocked[$0.id] != nil }.count
 
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(unlocked.count)").font(.system(size: 22, weight: .semibold).monospacedDigit())
+                    Text("\(earnedCount)").font(.system(size: 22, weight: .semibold).monospacedDigit())
                     Text("de \(allAchievements.count) logros").font(.system(size: 12)).foregroundStyle(.secondary)
                     if model.prestigeTotal > 0 {
                         Text("· \(model.prestigeTotal) de prestigio").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -776,7 +778,7 @@ struct AchievementsTab: View {
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.primary.opacity(0.08))
                         Capsule().fill(Theme.brand)
-                            .frame(width: max(g.size.width * Double(unlocked.count) / Double(allAchievements.count), 4))
+                            .frame(width: max(g.size.width * Double(earnedCount) / Double(allAchievements.count), 4))
                     }
                 }
                 .frame(height: 4)

@@ -237,12 +237,36 @@ struct CommunityView: View {
         .task { await community.refresh() }
     }
 
+    /// Share of achievements plus share of cards: the two count the same, however many there are of each.
+    static func score(_ p: SharedProfile) -> Double {
+        (p.achievementsTotal > 0 ? Double(p.achievementsHave) / Double(p.achievementsTotal) : 0)
+            + (p.cardsTotal > 0 ? Double(p.cardsHave) / Double(p.cardsTotal) : 0)
+    }
+
+    /// Best first; a tie goes to the higher prestige and then to the name.
+    static func ranked(_ members: [Member]) -> [Member] {
+        members.sorted { a, b in
+            let sa = score(a.profile), sb = score(b.profile)
+            if abs(sa - sb) > 1e-9 { return sa > sb }
+            if a.profile.prestige != b.profile.prestige { return a.profile.prestige > b.profile.prestige }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+    }
+
+    private static let podium = [hex(0xE9B93F), hex(0xB8BEC6), hex(0xC88A4E)]
+
     private var list: some View {
+        let ranking = Self.ranked(community.members)
         let rows = VStack(alignment: .leading, spacing: 2) {
-            ForEach(community.members) { m in
+            ForEach(Array(ranking.enumerated()), id: \.element.id) { place, m in
                 Button { withAnimation(.smooth(duration: 0.2)) { selected = m } } label: {
                     HStack(spacing: 10) {
+                        Text("\(place + 1)")
+                            .font(.system(size: place < 3 ? 13 : 11, weight: place < 3 ? .bold : .medium).monospacedDigit())
+                            .foregroundStyle(place < 3 ? Self.podium[place] : Color.secondary)
+                            .frame(width: 18)
                         Avatar(photo: community.photos[m.id], name: m.name, size: 34)
+                            .overlay { if place < 3 { Circle().strokeBorder(Self.podium[place], lineWidth: 2) } }
                         VStack(alignment: .leading, spacing: 1) {
                             HStack(spacing: 5) {
                                 Text(m.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
@@ -267,9 +291,9 @@ struct CommunityView: View {
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Comunidad").font(.system(size: 16, weight: .semibold))
+                Text("Ranking").font(.system(size: 16, weight: .semibold))
                 if !community.members.isEmpty {
-                    Text("\(community.members.count)").font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
+                    Text("por logros y cromos").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 CornerButton(symbol: "person.crop.circle", help: "Volver a mi perfil", action: back)
@@ -285,10 +309,10 @@ struct CommunityView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(16)
             } else if isSnapshotRender {
-                rows.padding(.horizontal, 10)
+                rows.padding(.horizontal, 6)
                 Spacer(minLength: 0)
             } else {
-                ScrollView(showsIndicators: false) { rows.padding(.horizontal, 10).padding(.bottom, 10) }
+                ScrollView(showsIndicators: false) { rows.padding(.horizontal, 6).padding(.bottom, 10) }
             }
         }
     }
@@ -339,7 +363,7 @@ struct MemberPage: View {
                     }
                 }
                 Spacer(minLength: 0)
-                CornerButton(symbol: "chevron.left", help: "Volver a la comunidad", action: back)
+                CornerButton(symbol: "chevron.left", help: "Volver al ranking", action: back)
                     .frame(maxHeight: .infinity, alignment: .top)
             }
             HStack(spacing: 8) {
@@ -375,12 +399,13 @@ struct MemberPage: View {
                         ForEach(0..<Profile.slots, id: \.self) { i in
                             let shown = i < p.achievements.count ? p.achievements[i] : nil
                             let a = shown.flatMap { anyAchievement($0.id) }
-                            // A hidden achievement stays a secret for whoever has not earned it; an exclusive one is there to be seen.
+                            // You see what they earned, but how to earn one that is still hidden for you stays a
+                            // secret; an exclusive one cannot be earned, so there is nothing to give away.
                             let secret = a.map { a in
                                 achievements.state.unlocked[a.id] == nil && progressTrackers[a.id] == nil && !exclusiveAchievements.contains { $0.id == a.id }
                             } ?? false
-                            AchievementBadge(achievement: a, tier: shown?.tier.flatMap(PrestigeTier.init(rawValue:)), secret: secret, plus: false)
-                                .help(secret ? "Aún no lo has descubierto" : a?.detail ?? "")
+                            AchievementBadge(achievement: a, tier: shown?.tier.flatMap(PrestigeTier.init(rawValue:)), plus: false)
+                                .help(secret ? "Aún no lo has descubierto: cómo se consigue es un secreto" : a?.detail ?? "")
                         }
                     }
                 }
